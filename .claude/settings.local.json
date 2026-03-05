@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ConvertFrom-Json)",
+      "Bash(curl http://localhost:8000/api/health)",
+      "Bash(curl http://localhost:5173)",
+      "Bash(npm run dev)",
+      "Read(//f/report_gen/$env:USERPROFILE/**)",
+      "Bash(Select-Object -First 10 Name)",
+      "Read(//d/Users/cjd/**)",
+      "Bash(curl -X POST http://localhost:8000/api/sessions -H \"Content-Type: application/json\" -d '{\"\"name\"\":\"\"测试会话\"\"}')",
+      "Bash(curl -X POST http://localhost:8000/api/sessions -H \"Content-Type: application/json\" -d '{\\\\\"\"name\\\\\"\":\\\\\"\"测试会话\\\\\"\"}')",
+      "Bash(d:/Python311/python.exe -c \"import requests; r = requests.post\\(''http://localhost:8000/api/sessions'', json={''name'': ''测试会话''}\\); print\\(r.json\\(\\)\\)\")",
+      "Bash(D:/anaconda/envs/report/python.exe -c \"import requests; r = requests.post\\(''http://localhost:8000/api/sessions'', json={''name'': ''测试会话''}\\); print\\(r.json\\(\\)\\)\")",
+      "Bash(D:/anaconda/envs/report/python.exe -c \":*)",
+      "Bash(cmd /c rmdir /s /q \"f:\\\\report_gen\\\\uploads\\\\2faea3a5\")",
+      "Bash(python -c \"from backend.agents.base import BaseAgent; from backend.agents.registry import ToolRegistry; from backend.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult; print\\(''基础模块导入成功''\\)\")",
+      "Bash(conda activate base)",
+      "Bash(source /c/Anaconda3/etc/profile.d/conda.sh)",
+      "Bash(python -c \"from backend.agents.base import BaseAgent; print\\(''BaseAgent 导入成功''\\)\")",
+      "Read(//c/Users/**)",
+      "Bash(D:anacondaScriptsconda.exe activate report)",
+      "Bash(cmd //c \"cd f:\\\\report_gen && f:\\\\anaconda3\\\\envs\\\\report\\\\python.exe -c \"\"from backend.agents.base import BaseAgent; print\\(''BaseAgent 导入成功''\\)\"\"\")",
+      "Bash(del \"f:\\\\report_gen\\\\backend\\\\services\\\\ai_agent.py\")",
+      "Bash(python -m py_compile backend/main.py backend/services/session_manager.py)",
+      "Bash(python -c \"from backend.main import app; print\\(''Import successful''\\)\")",
+      "Bash(python -m py_compile backend/tools/data_tools.py)",
+      "Bash(D:anacondaScriptsconda.exe run -n report python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000)",
+      "Bash(/d/anaconda/python.exe -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000)",
+      "Bash(cmd //c \"cd /d f:\\\\report_gen && D:\\\\anaconda\\\\envs\\\\report\\\\python.exe -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/sessions -H \"Content-Type: application/json\" -d \"{\"\"name\"\":\"\"测试会话\"\"}\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/sessions -H \"Content-Type: application/json\" -d '{\"\"name\"\":\"\"测试会话\"\"}')",
+      "Bash(powershell -Command \"Invoke-RestMethod -Uri ''http://localhost:8000/api/sessions'' -Method Post -ContentType ''application/json'' -Body ''{\"\"name\"\":\"\"测试会话\"\"}''\")",
+      "Bash(powershell -Command \"$session = Invoke-RestMethod -Uri ''http://localhost:8000/api/sessions'' -Method Get -ContentType ''application/json''; Write-Output $session.sessions[0].id\")",
+      "Bash(powershell -Command \"Invoke-RestMethod -Uri ''http://localhost:8000/api/sessions'' -Method Get\")",
+      "Bash(powershell -Command \"$fileContent = Get-Content -Path ''f:\\\\report_gen\\\\test.xlsx'' -AsByteStream; Invoke-RestMethod -Uri ''http://localhost:8000/api/sessions/80527e60/upload'' -Method Post -Form @{file=@{FileName=''test.xlsx'';Content=$fileContent}}\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/sessions/80527e60/upload -F \"file=@f:/report_gen/test.xlsx\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/sessions/80527e60/chat -H \"Content-Type: application/json\" -d \"{\"\"message\"\":\"\"分析数据\"\"}\")",
+      "Bash(powershell -Command \"$body = ''{\"\"message\"\":\"\"分析数据\"\"}''; Invoke-RestMethod -Uri ''http://localhost:8000/api/sessions/80527e60/chat'' -Method Post -ContentType ''application/json'' -Body $body\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/sessions/80527e60/chat -H \"Content-Type: application/json\" -d @-)",
+      "Bash(/d/anaconda/envs/report/python.exe -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000)"
+    ],
+    "additionalDirectories": [
+      "f:\\report_gen\\backend\\services\\__pycache__"
+    ]
+  }
+}
