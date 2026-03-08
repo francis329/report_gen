@@ -156,6 +156,37 @@
       </template>
     </div>
 
+    <!-- 报告生成进度对话框 -->
+    <el-dialog
+      v-model="showProgressDialog"
+      title="报告生成进度"
+      width="450px"
+      :close-on-click-modal="false"
+      :show-close="false"
+    >
+      <div class="progress-content">
+        <el-progress
+          :percentage="reportProgress?.progress || 0"
+          :status="reportProgress?.stage === 'complete' ? 'success' : reportProgress?.stage === 'error' ? 'exception' : undefined"
+        />
+        <div class="progress-message">
+          <el-icon v-if="reportProgress?.stage === 'error'" class="error-icon"><CircleClose /></el-icon>
+          <el-icon v-else-if="reportProgress?.stage === 'complete'" class="success-icon"><SuccessFilled /></el-icon>
+          <el-icon v-else class="loading-icon"><Loading /></el-icon>
+          <span>{{ reportProgress?.message || '正在处理...' }}</span>
+        </div>
+        <div v-if="reportProgress?.chapter" class="progress-chapter">
+          当前章节：{{ reportProgress.chapter }}
+        </div>
+      </div>
+      <template #footer>
+        <el-button v-if="reportProgress?.stage === 'complete'" type="primary" @click="viewGeneratedReport">
+          查看报告
+        </el-button>
+        <el-button v-else disabled>正在生成中...</el-button>
+      </template>
+    </el-dialog>
+
     <!-- API 密钥设置对话框 -->
     <el-dialog
       v-model="showApiKeyDialog"
@@ -177,10 +208,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Plus, Delete, User, Cpu, Document, UploadFilled, Upload
+  Plus, Delete, User, Cpu, Document, UploadFilled, Upload, CircleClose, SuccessFilled, Loading
 } from '@element-plus/icons-vue'
 import {
   sessionsApi,
@@ -204,7 +235,10 @@ const showApiKeyDialog = ref(false)
 const apiKey = ref('')
 const messagesContainer = ref(null)
 const isDragOver = ref(false)
-
+// 报告生成相关
+const reportProgress = ref(null)
+const showProgressDialog = ref(false)
+const progressWs = ref(null)
 // 计算属性
 const uploadUrl = computed(() => {
   if (!currentSessionId.value) return ''
@@ -309,11 +343,11 @@ const sendMessage = async () => {
     timestamp: new Date().toISOString()
   })
 
-  // 2. 添加 AI 正在处理的占位消息
-  const loadingMessageIndex = messages.value.length
+  // 2. 添加空的 AI 消息占位（用于流式显示）
+  const aiMessageIndex = messages.value.length
   messages.value.push({
     role: 'assistant',
-    content: 'AI 正在分析数据，请耐心等待...',
+    content: '',
     timestamp: new Date().toISOString(),
     isLoading: true
   })
@@ -321,42 +355,43 @@ const sendMessage = async () => {
   await nextTick()
   scrollToBottom()
 
+  // 3. 使用流式 API
+  let streamingWs = null
   try {
-    const res = await chatApi.send(currentSessionId.value, message)
-
-    // 3. AI 处理完成，更新占位消息为实际回复
-    let aiContent = res.data.response
-
-    // 构建 AI 回复消息对象
-    const aiMessage = {
-      role: 'assistant',
-      content: aiContent,
-      timestamp: new Date().toISOString(),
-      reportUrl: res.data.report_url,
-      isLoading: false
-    }
-
-    // 如果有报告链接，添加提示文本
-    if (res.data.report_url) {
-      aiMessage.content += `\n\n---\n📊 分析报告已生成，点击下方按钮查看或下载报告`
-    }
-
-    // 替换占位消息
-    messages.value[loadingMessageIndex] = aiMessage
-
+    streamingWs = chatApi.sendStreaming(
+      currentSessionId.value,
+      message,
+      // onChunk - 逐步更新内容
+      (chunk) => {
+        messages.value[aiMessageIndex].content += chunk
+        nextTick(() => scrollToBottom())
+      },
+      // onComplete - 完成
+      (data) => {
+        messages.value[aiMessageIndex].isLoading = false
+        messages.value[aiMessageIndex].timestamp = new Date().toISOString()
+        if (data.report_url) {
+          messages.value[aiMessageIndex].reportUrl = data.report_url
+          messages.value[aiMessageIndex].content += '\n\n---\n📊 分析报告已生成，点击下方按钮查看或下载报告'
+        }
+      },
+      // onError - 错误
+      (error) => {
+        messages.value[aiMessageIndex].content = `抱歉，处理您的请求时出现错误：${error}`
+        messages.value[aiMessageIndex].isLoading = false
+        messages.value[aiMessageIndex].isError = true
+      }
+    )
   } catch (error) {
-    // 出错时更新占位消息为错误提示
-    messages.value[loadingMessageIndex] = {
+    messages.value[aiMessageIndex] = {
       role: 'assistant',
-      content: `抱歉，处理您的请求时出现错误：${error.response?.data?.detail || error.message}`,
+      content: `抱歉，处理您的请求时出现错误：${error.message || error}`,
       timestamp: new Date().toISOString(),
       isLoading: false,
       isError: true
     }
   } finally {
     isSending.value = false
-    await nextTick()
-    scrollToBottom()
   }
 }
 
@@ -461,8 +496,28 @@ const saveApiKey = async () => {
 const renderMessage = (content) => {
   if (!content) return ''
 
+  // 新增：尝试解析 JSON 格式响应（处理 AI 返回 {"response": "..."} 的情况）
+  let processedContent = content
+  try {
+    // 移除可能包裹的代码块标记
+    const cleaned = content.replace(/```json\s*/g, '').replace(/\s*```/g, '').trim()
+    const parsed = JSON.parse(cleaned)
+    if (parsed && typeof parsed === 'object') {
+      // 如果是 {"response": "..."} 格式，提取 response 内容
+      if (parsed.response) {
+        processedContent = parsed.response
+      }
+      // 如果是工具调用格式，显示友好提示
+      else if (parsed.tool_call) {
+        processedContent = '正在处理您的请求...'
+      }
+    }
+  } catch (e) {
+    // 不是 JSON 格式，继续正常渲染
+  }
+
   // 先转义 HTML 特殊字符，防止 XSS
-  let html = content
+  let html = processedContent
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -521,9 +576,22 @@ const downloadReport = (reportUrl) => {
   }
 }
 
+// 查看生成的报告
+const viewGeneratedReport = () => {
+  if (reportProgress.value?.report_id) {
+    window.open(`/reports/${reportProgress.value.report_id}`, '_blank')
+  }
+}
+
 // 生命周期
 onMounted(() => {
   loadSessions()
+})
+
+onBeforeUnmount(() => {
+  if (progressWs.value) {
+    progressWs.value.close()
+  }
 })
 </script>
 
@@ -899,5 +967,49 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+}
+
+/* 进度对话框样式 */
+.progress-content {
+  padding: 20px 0;
+}
+
+.progress-message {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+  font-size: 0.95rem;
+  color: #333;
+}
+
+.progress-message .error-icon {
+  color: #dc3545;
+  font-size: 1.5rem;
+}
+
+.progress-message .success-icon {
+  color: #28a745;
+  font-size: 1.5rem;
+}
+
+.progress-message .loading-icon {
+  color: #409eff;
+  font-size: 1.5rem;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.progress-chapter {
+  margin-top: 10px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  color: #666;
 }
 </style>

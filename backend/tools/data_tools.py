@@ -2,6 +2,7 @@
 数据分析工具
 提供数据分析相关的工具实现
 """
+import time
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
@@ -276,15 +277,43 @@ class AnalyzeDataTool(BaseTool):
             return ToolResult(success=False, error="缺少 session_id 参数")
 
         # 获取文件数据
+        start_time = time.time()
         file_data = self._get_file_data(session_id)
+        get_file_time = time.time() - start_time
+        print(f"[PERF] analyze_data - 获取文件数据：{get_file_time:.3f}s")
+
+        # 调试日志：详细输出文件数据获取情况
+        files = self.session_manager.get_files(session_id)
+        print(f"[DEBUG] analyze_data - session_id: {session_id}")
+        print(f"[DEBUG] analyze_data - 文件数量：{len(files)}")
+        for f in files:
+            print(f"[DEBUG] analyze_data - 文件：{f.filename}, ID: {f.id}")
+            data = self.session_manager.get_file_data(session_id, f.id)
+            print(f"[DEBUG] analyze_data - 文件数据获取结果：{'成功' if data else '失败'}")
+            if data:
+                print(f"[DEBUG] analyze_data - Sheet 数量：{len(data)}")
+
         if not file_data:
-            return ToolResult(success=False, error="未找到数据文件，请先上传文件")
+            # 更详细的错误信息
+            if len(files) == 0:
+                return ToolResult(success=False, error="未找到数据文件，请先上传文件")
+            else:
+                return ToolResult(success=False, error="数据文件已上传但无法读取，请检查文件格式")
 
         # 执行分析
+        start_time = time.time()
         result = _analyze_multiple_sheets(file_data, merge_for_analysis=merge_sheets)
+        analyze_time = time.time() - start_time
+        print(f"[PERF] analyze_data - 执行分析：{analyze_time:.3f}s")
 
         # 存储分析结果
+        start_time = time.time()
         self.session_manager.store_analysis_result(session_id, result)
+        store_time = time.time() - start_time
+        print(f"[PERF] analyze_data - 存储结果：{store_time:.3f}s")
+
+        total_time = get_file_time + analyze_time + store_time
+        print(f"[PERF] analyze_data - 总耗时：{total_time:.3f}s")
 
         # 生成摘要消息
         if merge_sheets and result.get("merged_analysis"):

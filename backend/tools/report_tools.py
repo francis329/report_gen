@@ -2,79 +2,97 @@
 报告生成工具
 提供报告生成相关的工具实现
 """
+from typing import Optional
 from backend.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from backend.services.session_manager import SessionManager
 
 
-class GenerateReportTool(BaseTool):
-    """生成报告工具 - 生成完整的 HTML 数据分析报告"""
+class GenerateDynamicReportTool(BaseTool):
+    """
+    生成动态报告工具
 
-    def __init__(self, session_manager: SessionManager):
+    调用 ReportAgent 完成智能报告生成
+    """
+
+    def __init__(
+        self,
+        session_manager: SessionManager,
+        api_key: Optional[str] = None
+    ):
         self.session_manager = session_manager
+        self.api_key = api_key
 
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
-            name="generate_report",
-            description="生成完整的 HTML 格式数据分析报告，包含数据概览、质量分析、详细统计和可视化图表。",
+            name="generate_dynamic_report",
+            description="根据用户需求和数据特征，智能生成动态分析报告。"
+                       "报告结构由 AI 根据分析主题自动创造，不是固定模板。",
             parameters=[
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID",
+                    required=True
                 ),
                 ToolParameter(
-                    name="include_charts",
-                    type="boolean",
-                    description="是否包含图表",
-                    required=False,
-                    default=True
-                ),
-                ToolParameter(
-                    name="ai_summary",
+                    name="user_request",
                     type="string",
-                    description="AI 分析摘要，将添加到报告中",
-                    required=False
+                    description="用户的分析请求文本，例如：'分析主被叫失败原因'、'分析用户流失情况'",
+                    required=True
                 )
             ]
         )
 
     async def execute(self, **kwargs) -> ToolResult:
-        from backend.services.report_generator import ReportGenerator
+        from backend.agents.report_agent import ReportAgent
+        from backend.websocket_manager import ws_manager
 
         session_id = kwargs.get("session_id")
-        include_charts = kwargs.get("include_charts", True)
-        ai_summary = kwargs.get("ai_summary", "")
+        # 参数名映射：LLM 可能使用 topic/request 等同义词，统一映射为 user_request
+        user_request = kwargs.get("user_request") or kwargs.get("topic") or kwargs.get("request")
+
+        print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 开始执行，session_id: {session_id}, user_request: {user_request}")
 
         if not session_id:
-            return ToolResult(success=False, error="缺少 session_id 参数")
+            print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 错误：缺少 session_id 参数")
+            return ToolResult(
+                success=False,
+                error="缺少 session_id 参数。正确参数：session_id (string), user_request (string)"
+            )
+        if not user_request:
+            print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 错误：缺少 user_request 参数")
+            return ToolResult(
+                success=False,
+                error="缺少 user_request 参数。正确参数：session_id (string), user_request (string)"
+            )
 
         session = self.session_manager.get_session(session_id)
+        print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 会话检查：{'存在' if session else '不存在'}")
         if not session:
             return ToolResult(success=False, error="会话不存在")
 
-        analysis_results = self.session_manager.get_analysis_result(session_id)
-        if not analysis_results:
-            return ToolResult(
-                success=False,
-                error="暂无分析结果，请先调用 analyze_data 工具分析数据"
-            )
-
-        # 获取图表（如果需要）
-        charts = self.session_manager.get_charts(session_id) if include_charts else []
-
         try:
-            # 生成 HTML 报告
-            report_id = ReportGenerator.generate_html_report(
-                session_id=session_id,
-                session_name=session.name,
-                analysis_results=analysis_results,
-                charts=charts,
-                ai_summary=ai_summary
-            )
+            print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 创建 ReportAgent")
+            # 创建 ReportAgent
+            agent = ReportAgent(self.session_manager, self.api_key)
 
-            # 更新会话的报告 ID
-            self.session_manager.set_report_id(session_id, report_id)
+            # 创建进度回调函数
+            async def progress_callback(progress: dict):
+                try:
+                    await ws_manager.broadcast_progress(session_id, progress)
+                except Exception as e:
+                    # WebSocket 可能未连接，忽略错误
+                    print(f"发送进度通知失败：{e}")
+
+            # 生成报告（带进度回调）
+            print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 调用 agent.generate_report()")
+            report_id = await agent.generate_report(
+                session_id=session_id,
+                user_request=user_request,
+                progress_callback=progress_callback
+            )
+            print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 报告生成成功，report_id: {report_id}")
 
             return ToolResult(
                 success=True,
@@ -83,18 +101,22 @@ class GenerateReportTool(BaseTool):
                     "view_url": f"/api/reports/{report_id}",
                     "download_url": f"/api/reports/{report_id}/download"
                 },
-                message="报告已生成"  # 友好消息，不包含路径
+                message=f"报告已生成，ID: {report_id}"
             )
 
         except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 报告生成失败：{e}")
+            print(f"[GENERATE_DYNAMIC_REPORT_TOOL] 错误详情：{error_detail}")
             return ToolResult(
                 success=False,
-                error=f"生成报告失败：{str(e)}"
+                error=f"报告生成失败：{str(e)}"
             )
 
 
-class UpdateReportTool(BaseTool):
-    """更新报告工具 - 在现有报告基础上更新 AI 分析摘要"""
+class GetReportTool(BaseTool):
+    """获取报告工具"""
 
     def __init__(self, session_manager: SessionManager):
         self.session_manager = session_manager
@@ -102,72 +124,33 @@ class UpdateReportTool(BaseTool):
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
-            name="update_report",
-            description="更新现有报告的 AI 分析摘要部分。",
+            name="get_report",
+            description="获取已生成的报告 ID 和访问链接",
             parameters=[
                 ToolParameter(
                     name="session_id",
                     type="string",
                     description="会话 ID"
-                ),
-                ToolParameter(
-                    name="ai_summary",
-                    type="string",
-                    description="新的 AI 分析摘要"
                 )
             ]
         )
 
     async def execute(self, **kwargs) -> ToolResult:
-        from backend.services.report_generator import ReportGenerator
-
         session_id = kwargs.get("session_id")
-        ai_summary = kwargs.get("ai_summary")
 
         if not session_id:
             return ToolResult(success=False, error="缺少 session_id 参数")
-        if not ai_summary:
-            return ToolResult(success=False, error="缺少 ai_summary 参数")
 
-        session = self.session_manager.get_session(session_id)
-        if not session:
-            return ToolResult(success=False, error="会话不存在")
+        report_id = self.session_manager.get_report_id(session_id)
+        if not report_id:
+            return ToolResult(success=False, error="未找到报告，请先生成报告")
 
-        if not session.report_id:
-            return ToolResult(
-                success=False,
-                error="暂无报告，请先生成报告"
-            )
-
-        analysis_results = self.session_manager.get_analysis_result(session_id)
-        if not analysis_results:
-            return ToolResult(success=False, error="暂无分析结果")
-
-        charts = self.session_manager.get_charts(session_id)
-
-        try:
-            # 重新生成报告
-            report_id = ReportGenerator.generate_html_report(
-                session_id=session_id,
-                session_name=session.name,
-                analysis_results=analysis_results,
-                charts=charts,
-                ai_summary=ai_summary
-            )
-
-            self.session_manager.set_report_id(session_id, report_id)
-
-            return ToolResult(
-                success=True,
-                data={
-                    "report_id": report_id,
-                    "view_url": f"/api/reports/{report_id}"
-                },
-                message="报告已更新"  # 友好消息，不包含路径
-            )
-
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                error=f"更新报告失败：{str(e)}"
-            )
+        return ToolResult(
+            success=True,
+            data={
+                "report_id": report_id,
+                "view_url": f"/api/reports/{report_id}",
+                "download_url": f"/api/reports/{report_id}/download"
+            },
+            message="报告已找到"
+        )

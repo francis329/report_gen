@@ -85,7 +85,16 @@ class ChartBuilder:
         """创建饼图"""
         chart = Pie(init_opts=opts.InitOpts(width="100%", height="400px"))
 
-        pairs = [(k, v) for k, v in data.get("values", {}).items()]
+        pairs = [(k, v) for k, v in data.get("values", {}).items() if v is not None and v > 0]
+
+        # 如果没有有效数据，返回空图表
+        if not pairs:
+            print(f"[WARN] 饼图数据为空：{data}")
+            return {
+                "type": "pie",
+                "title": title,
+                "html": "<div style='text-align:center;padding:40px;color:#999;'>暂无数据</div>",
+            }
 
         chart.add(
             series_name=title,

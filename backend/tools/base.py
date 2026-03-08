@@ -86,5 +86,26 @@ class BaseTool(ABC):
             }
         }
 
+    def get_usage_example(self) -> str:
+        """
+        获取工具调用示例（用于系统提示词中指导 LLM）
+
+        :return: JSON 格式的工具调用示例
+        """
+        example_args = {}
+        for param in self.definition.parameters:
+            if param.type == "string":
+                example_args[param.name] = f"<{param.name}>"
+            elif param.type == "number":
+                example_args[param.name] = 0
+            elif param.type == "boolean":
+                example_args[param.name] = False
+            elif param.type == "array":
+                example_args[param.name] = []
+            elif param.type == "object":
+                example_args[param.name] = {}
+
+        return f'{{"name": "{self.definition.name}", "arguments": {example_args}}}'
+
     def __repr__(self) -> str:
         return f"<Tool {self.definition.name}>"

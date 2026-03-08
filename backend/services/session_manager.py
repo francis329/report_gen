@@ -9,6 +9,7 @@ from pathlib import Path
 
 from backend.config import UPLOAD_DIR, REPORTS_DIR
 from backend.models.schemas import Session, Message, FileInfo, SheetInfo, MessageRole, ClarificationState
+from backend.models.report import ReportPlan, ChapterResult, ChartDataQuery
 
 
 class SessionManager:
@@ -114,15 +115,43 @@ class SessionManager:
 
     def store_file_data(self, session_id: str, file_id: str, data: dict) -> None:
         """存储文件数据（按 sheet 页分开）"""
-        if session_id not in self._data_store:
+        # 检查会话是否存在
+        if session_id not in self._sessions:
             raise ValueError(f"Session {session_id} not found")
+
+        # 如果 _data_store[session_id] 不存在，初始化它
+        if session_id not in self._data_store:
+            print(f"[DEBUG] store_file_data - _data_store[{session_id}] 不存在，正在初始化")
+            self._data_store[session_id] = {
+                "files_data": {},
+                "analysis_results": {},
+                "charts": {},
+            }
+
         self._data_store[session_id]["files_data"][file_id] = data
+        print(f"[DEBUG] store_file_data - 已存储文件数据，file_id: {file_id}, sheet 数量：{len(data)}")
 
     def get_file_data(self, session_id: str, file_id: str) -> Optional[dict]:
         """获取文件数据"""
-        if session_id not in self._data_store:
+        # 检查会话是否存在
+        if session_id not in self._sessions:
+            print(f"[DEBUG] get_file_data - session_id '{session_id}' 不存在于 sessions")
             return None
-        return self._data_store[session_id]["files_data"].get(file_id)
+
+        # 检查 _data_store[session_id] 是否存在，不存在则返回 None（不自动初始化）
+        if session_id not in self._data_store:
+            print(f"[DEBUG] get_file_data - _data_store[{session_id}] 不存在，文件数据可能已丢失或会话已重置")
+            return None
+
+        files_data = self._data_store[session_id].get("files_data", {})
+        print(f"[DEBUG] get_file_data - files_data keys: {list(files_data.keys())}, 请求的 file_id: {file_id}")
+
+        result = files_data.get(file_id)
+        if result:
+            print(f"[DEBUG] get_file_data - 成功获取数据，sheet 数量：{len(result)}")
+        else:
+            print(f"[DEBUG] get_file_data - 未找到 file_id '{file_id}' 的数据，可用 file_id: {list(files_data.keys())}")
+        return result
 
     def store_analysis_result(self, session_id: str, result: dict) -> None:
         """存储分析结果"""
@@ -186,3 +215,106 @@ class SessionManager:
         if session_id not in self._sessions:
             raise ValueError(f"Session {session_id} not found")
         self._sessions[session_id].clarification_state = None
+
+    # ========== 报告生成相关方法（新增） ==========
+
+    def store_report_plan(self, session_id: str, plan: ReportPlan) -> None:
+        """存储报告规划"""
+        if session_id not in self._sessions:
+            raise ValueError(f"Session {session_id} not found")
+        if session_id not in self._data_store:
+            self._data_store[session_id] = {}
+        self._data_store[session_id]["report_plan"] = plan
+
+    def get_report_plan(self, session_id: str) -> Optional[ReportPlan]:
+        """获取报告规划"""
+        if session_id not in self._data_store:
+            return None
+        return self._data_store[session_id].get("report_plan")
+
+    def store_chapter_result(self, session_id: str, chapter_id: str, result: ChapterResult) -> None:
+        """存储章节分析结果"""
+        if session_id not in self._sessions:
+            raise ValueError(f"Session {session_id} not found")
+        if session_id not in self._data_store:
+            self._data_store[session_id] = {}
+        if "chapter_results" not in self._data_store[session_id]:
+            self._data_store[session_id]["chapter_results"] = {}
+        self._data_store[session_id]["chapter_results"][chapter_id] = result
+
+    def get_chapter_result(self, session_id: str, chapter_id: str) -> Optional[ChapterResult]:
+        """获取章节分析结果"""
+        if session_id not in self._data_store:
+            return None
+        chapter_results = self._data_store[session_id].get("chapter_results", {})
+        return chapter_results.get(chapter_id)
+
+    def get_all_chapter_results(self, session_id: str) -> Dict[str, ChapterResult]:
+        """获取所有章节结果"""
+        if session_id not in self._data_store:
+            return {}
+        return self._data_store[session_id].get("chapter_results", {})
+
+    def store_chart_data_query(self, session_id: str, chart_id: str, query: ChartDataQuery) -> None:
+        """存储图表数据查询条件（用于点击查看原始数据）"""
+        if session_id not in self._sessions:
+            raise ValueError(f"Session {session_id} not found")
+        if session_id not in self._data_store:
+            self._data_store[session_id] = {}
+        if "chart_queries" not in self._data_store[session_id]:
+            self._data_store[session_id]["chart_queries"] = {}
+        self._data_store[session_id]["chart_queries"][chart_id] = query
+
+    def get_chart_data_query(self, session_id: str, chart_id: str) -> Optional[ChartDataQuery]:
+        """获取图表数据查询条件"""
+        if session_id not in self._data_store:
+            return None
+        chart_queries = self._data_store[session_id].get("chart_queries", {})
+        return chart_queries.get(chart_id)
+
+    def filter_data_by_chart_element(
+        self,
+        session_id: str,
+        chart_id: str,
+        element_key: str
+    ) -> List[Dict]:
+        """
+        根据图表元素筛选原始数据
+
+        :param session_id: 会话 ID
+        :param chart_id: 图表 ID
+        :param element_key: 元素标识（如饼图的某一块名称、柱状图的某一柱）
+        :return: 筛选后的数据列表
+        """
+        query = self.get_chart_data_query(session_id, chart_id)
+        if not query:
+            # 没有查询条件，返回空列表
+            return []
+
+        # 获取文件数据
+        files = self.get_files(session_id)
+        if not files:
+            return []
+
+        file_data = self.get_file_data(session_id, files[0].id)
+        if not file_data:
+            return []
+
+        # 获取第一个 sheet 的 DataFrame
+        df = list(file_data.values())[0]
+
+        # 根据查询类型和元素筛选数据
+        element_field = query.element_key_field or (query.dimensions[0] if query.dimensions else None)
+
+        if element_field and element_field in df.columns:
+            filtered_df = df[df[element_field] == element_key]
+            return filtered_df.to_dict('records')
+
+        # 如果没有筛选条件，返回全部数据
+        return df.to_dict('records')
+
+    def get_report_id(self, session_id: str) -> Optional[str]:
+        """获取会话的报告 ID"""
+        if session_id not in self._sessions:
+            return None
+        return self._sessions[session_id].report_id

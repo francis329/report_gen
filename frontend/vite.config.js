@@ -14,7 +14,12 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
-        changeOrigin: true
+        changeOrigin: true,
+        ws: true  // 启用 WebSocket 支持，用于 /api/sessions/{id}/chat/stream
+      },
+      '/ws': {
+        target: 'ws://localhost:8000',
+        ws: true
       }
     }
   }

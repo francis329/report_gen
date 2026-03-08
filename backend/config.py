@@ -18,4 +18,4 @@ ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 
 # AI 模型配置
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
-DASHSCOPE_MODEL = "qwen3.5-plus"  # 阿里云百炼有效模型 ID
+DASHSCOPE_MODEL = "qwen3.5-flash"  # 更快的模型

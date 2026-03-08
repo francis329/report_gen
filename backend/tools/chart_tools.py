@@ -2,6 +2,7 @@
 图表生成工具
 提供数据可视化相关的工具实现
 """
+import time
 from typing import Dict, Any, List
 
 from backend.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
@@ -312,6 +313,9 @@ class AutoGenerateChartsTool(BaseTool):
 
             # 存储所有生成的图表
             existing_charts = self.session_manager.get_charts(session_id)
+            # 确保 existing_charts 是列表
+            if not isinstance(existing_charts, list):
+                existing_charts = []
             existing_charts.extend(charts)
             self.session_manager.store_charts(session_id, existing_charts)
 
