@@ -97,10 +97,10 @@
                 v-model="inputMessage"
                 placeholder="输入分析需求，如：分析销售数据趋势..."
                 @keydown.enter="sendMessage"
-                :disabled="isSending"
+                :disabled="isSending || isReceiving"
               >
                 <template #append>
-                  <el-button @click="sendMessage" :loading="isSending">
+                  <el-button @click="sendMessage" :loading="isSending || isReceiving">
                     发送
                   </el-button>
                 </template>
@@ -211,14 +211,12 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Plus, Delete, User, Cpu, Document, UploadFilled, Upload, CircleClose, SuccessFilled, Loading
+  Plus, Delete, User, Cpu, Document, UploadFilled, Upload
 } from '@element-plus/icons-vue'
 import {
   sessionsApi,
   uploadApi,
-  chatApi,
-  reportApi,
-  configApi
+  chatApi
 } from './api/client'
 
 // 状态
@@ -227,6 +225,7 @@ const currentSessionId = ref(null)
 const messages = ref([])
 const inputMessage = ref('')
 const isSending = ref(false)
+const isReceiving = ref(false)  // 新增：AI 回复中
 const currentFiles = ref([])
 const sheetsInfo = ref([])
 const reportInfo = ref(null)
@@ -335,6 +334,7 @@ const sendMessage = async () => {
 
   inputMessage.value = ''
   isSending.value = true
+  isReceiving.value = true  // 开始接收 AI 回复
 
   // 1. 立即添加用户消息
   messages.value.push({
@@ -374,12 +374,14 @@ const sendMessage = async () => {
           messages.value[aiMessageIndex].reportUrl = data.report_url
           messages.value[aiMessageIndex].content += '\n\n---\n📊 分析报告已生成，点击下方按钮查看或下载报告'
         }
+        isReceiving.value = false  // AI 回复完成
       },
       // onError - 错误
       (error) => {
         messages.value[aiMessageIndex].content = `抱歉，处理您的请求时出现错误：${error}`
         messages.value[aiMessageIndex].isLoading = false
         messages.value[aiMessageIndex].isError = true
+        isReceiving.value = false  // 发生错误，允许再次发送
       }
     )
   } catch (error) {
@@ -390,6 +392,7 @@ const sendMessage = async () => {
       isLoading: false,
       isError: true
     }
+    isReceiving.value = false  // 发生错误，允许再次发送
   } finally {
     isSending.value = false
   }

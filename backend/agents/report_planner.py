@@ -152,7 +152,7 @@ class ReportPlanner:
         - 期望的分析维度
         """
         print(f"[REPORT_PLANNER] _parse_intent: 开始解析用户意图")
-        prompt = f"""分析用户需求，提取关键信息。返回 JSON：
+        prompt = f"""分析用户需求，提取关键信息。返回纯 JSON（不要使用 ```json 包裹）：
 
 用户请求：{user_request}
 数据字段：{json.dumps(data_schema, ensure_ascii=False)}
@@ -167,7 +167,7 @@ class ReportPlanner:
         print(f"[REPORT_PLANNER] _parse_intent: LLM 响应长度：{len(response) if response else 0}")
 
         try:
-            intent = json.loads(response)
+            intent = self._parse_json_response(response)
             print(f"[REPORT_PLANNER] _parse_intent: JSON 解析成功")
             return intent
         except json.JSONDecodeError as e:
@@ -206,6 +206,11 @@ class ReportPlanner:
 2. 每章指定使用的字段和分析思路
 3. 最后一章为"结论与建议"
 
+【输出格式要求】
+- 直接输出纯 JSON，不要使用 ```json 或 ``` 包裹
+- 不要包含任何解释性文字或额外内容
+- 确保 JSON 格式正确，可被 json.loads() 直接解析
+
 输出 JSON 格式：
 {{
     "title": "报告标题",
@@ -224,7 +229,7 @@ class ReportPlanner:
         print(f"[REPORT_PLANNER] _generate_plan: LLM 响应长度：{len(response) if response else 0}")
 
         try:
-            plan_data = json.loads(response)
+            plan_data = self._parse_json_response(response)
             print(f"[REPORT_PLANNER] _generate_plan: JSON 解析成功")
         except json.JSONDecodeError as e:
             # 如果解析失败，创建默认规划
@@ -278,7 +283,15 @@ class ReportPlanner:
         for schema in data_schema:
             columns.extend(schema.get("columns", []))
 
-        # 创建简单的章节结构
+        # 生成更具体的章节标题，避免"数据分析分析"这种重复命名
+        theme = intent.get('theme', '数据')
+        # 如果 theme 是"数据分析"这样过于通用的词，使用更具体的标题
+        if theme in ['数据分析', '数据', '分析']:
+            analysis_title = "核心指标分析"
+        else:
+            analysis_title = f"{theme}关键发现"
+
+        # 创建章节结构（至少 3 章，包含"结论与建议"）
         chapters = [
             {
                 "id": "chapter-1",
@@ -289,20 +302,44 @@ class ReportPlanner:
             },
             {
                 "id": "chapter-2",
-                "title": f"{intent['theme']}分析",
+                "title": analysis_title,
                 "description": "根据用户需求进行深入分析",
                 "dimensions": columns[:10],
-                "analysis_guidance": f"分析{intent['theme']}的关键特征"
+                "analysis_guidance": f"分析{theme}的关键特征"
+            },
+            {
+                "id": "chapter-3",
+                "title": "结论与建议",
+                "description": "总结分析发现并提出建议",
+                "dimensions": columns[:5],
+                "analysis_guidance": "基于前序分析得出结论，提出 actionable 建议"
             }
         ]
 
         return {
-            "title": f"{intent['theme']}分析报告",
-            "theme": intent["theme"],
+            "title": f"{theme}分析报告",
+            "theme": theme,
             "user_intent": intent["user_intent_summary"],
             "chapters": chapters,
             "suggested_charts": []
         }
+
+    def _parse_json_response(self, response: str) -> Dict:
+        """
+        解析 LLM 的 JSON 响应，处理常见的格式问题
+
+        :param response: LLM 返回的原始响应字符串
+        :return: 解析后的 JSON 对象
+        """
+        response = response.strip()
+        # 移除 markdown 代码块标记
+        if response.startswith("```json"):
+            response = response[7:]
+        elif response.startswith("```"):
+            response = response[3:]
+        if response.endswith("```"):
+            response = response[:-3]
+        return json.loads(response.strip())
 
     async def _call_llm(self, prompt: str) -> str:
         """调用 LLM"""

@@ -8,7 +8,7 @@
 
 - 📊 **多会话管理** - 支持创建多个独立会话，数据隔离
 - 📁 **文件上传** - 支持 CSV、Excel 文件（包括多 sheet 页）
-- 🤖 **AI 智能分析** - 基于 qwen3.5-plus 模型理解分析需求
+- 🤖 **AI 智能分析** - 基于 qwen3.5-flash 模型理解分析需求
 - 📈 **数据可视化** - 自动生成柱状图、折线图、饼图、散点图、热力图等
 - 📋 **HTML 报告** - 生成美观的数据分析报告，支持查看和下载
 - 💬 **多轮对话** - 通过对话形式逐步深入分析数据
@@ -18,6 +18,8 @@
 - 📝 **性能日志** - 内置性能追踪，记录 API 响应时间
 
 ## 系统架构图
+
+![系统架构图](./architecture2.1.svg)
 
 ```mermaid
 graph TB
@@ -41,7 +43,7 @@ graph TB
     subgraph 核心层
         C[Tool-Calling Agent]
         C1[ReAct 循环引擎]
-        C2[LLM 接口 qwen3.5-plus]
+        C2[LLM 接口 qwen3.5-flash]
         C --> C1 & C2
     end
 
@@ -71,7 +73,7 @@ graph TB
     end
 
     subgraph 外部服务
-        L[DashScope API<br/>qwen3.5-plus 模型]
+        L[DashScope API<br/>qwen3.5-flash 模型]
     end
 
     A3 -->|HTTP 请求 | B3
@@ -260,11 +262,9 @@ npm run dev
 | GET | /api/sessions/{id} | 获取会话详情 |
 | DELETE | /api/sessions/{id} | 删除会话 |
 | POST | /api/sessions/{id}/upload | 上传文件 |
-| POST | /api/sessions/{id}/chat | 发送消息（普通） |
 | GET | /api/sessions/{id}/report | 获取报告 |
 | GET | /api/reports/{id} | 查看报告 |
 | GET | /api/reports/{id}/download | 下载报告 |
-| POST | /api/sessions/{id}/generate-report | 触发智能报告生成（异步） |
 | GET | /api/charts/{chart_id}/raw-data | 获取图表原始数据 |
 | GET | /api/tools | 获取可用工具列表 |
 | GET | /api/health | 健康检查 |
@@ -274,7 +274,7 @@ npm run dev
 | 端点 | 描述 |
 |------|------|
 | `/ws/progress/{session_id}` | 接收报告生成进度通知 |
-| `/api/sessions/{session_id}/chat/stream?message={msg}` | 流式聊天接口，实时推送 AI 回复 |
+| `/api/sessions/{session_id}/chat/stream?message={msg}` | 流式聊天接口，实时推送 AI 回复（推荐使用） |
 
 ## 技术栈
 
@@ -283,11 +283,12 @@ npm run dev
 - FastAPI >=0.115.0
 - pandas >=2.2.0 / numpy >=1.26.0
 - pyecharts >=2.0.1（可视化）
-- dashscope >=1.20.0（阿里通义千问 SDK）
+- dashscope >=1.20.0（阿里通义千问 SDK，使用 qwen3.5-flash 模型）
 - openpyxl >=3.1.2（Excel 处理）
 - python-dotenv >=1.0.0
 - aiofiles >=23.2.1
 - websockets >=12.0（WebSocket 支持）
+- pydantic >=2.0.0（数据验证）
 
 **前端:**
 - Vue 3 >=3.4.0

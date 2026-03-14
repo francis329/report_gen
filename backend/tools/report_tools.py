@@ -32,8 +32,8 @@ class GenerateDynamicReportTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID",
-                    required=True
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 ),
                 ToolParameter(
                     name="user_request",
@@ -44,7 +44,7 @@ class GenerateDynamicReportTool(BaseTool):
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         from backend.agents.report_agent import ReportAgent
         from backend.websocket_manager import ws_manager
 
@@ -130,12 +130,13 @@ class GetReportTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 )
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         session_id = kwargs.get("session_id")
 
         if not session_id:

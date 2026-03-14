@@ -28,11 +28,16 @@ wheels/
 .env
 .env.local
 
-# Uploads
-backend/uploads/*
-!backend/uploads/.gitkeep
-backend/reports/*
-!backend/reports/.gitkeep
+# Uploads & Reports
+uploads/*
+!uploads/.gitkeep
+!uploads/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Docs (for SVG diagrams)
+docs/*
+!docs/.gitkeep
 
 # Node
 frontend/node_modules/

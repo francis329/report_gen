@@ -3,13 +3,18 @@
 负责创建、删除、查询会话，以及会话数据的隔离存储
 """
 import uuid
+import time
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 from pathlib import Path
 
 from backend.config import UPLOAD_DIR, REPORTS_DIR
-from backend.models.schemas import Session, Message, FileInfo, SheetInfo, MessageRole, ClarificationState
+from backend.models.schemas import Session, Message, FileInfo, SheetInfo, MessageRole, ClarificationState, AnalysisContext
 from backend.models.report import ReportPlan, ChapterResult, ChartDataQuery
+
+# 配置日志
+logger = logging.getLogger('session_manager')
 
 
 class SessionManager:
@@ -18,6 +23,7 @@ class SessionManager:
     _instance: Optional['SessionManager'] = None
     _sessions: Dict[str, Session] = {}
     _data_store: Dict[str, dict] = {}  # 存储会话相关数据（文件数据、分析结果等）
+    _analysis_results_store: Dict[str, Dict] = {}  # 共享分析结果存储（session_id -> analysis_results）
 
     def __new__(cls):
         if cls._instance is None:
@@ -30,6 +36,7 @@ class SessionManager:
         cls._instance = None
         cls._sessions = {}
         cls._data_store = {}
+        cls._analysis_results_store = {}
 
     def create_session(self, name: str = "新会话") -> Session:
         """创建新会话"""
@@ -47,6 +54,14 @@ class SessionManager:
             "files_data": {},  # 存储文件数据 {file_id: {sheet_name: dataframe}}
             "analysis_results": {},  # 存储分析结果
             "charts": {},  # 存储图表数据
+        }
+        # 初始化共享分析结果存储
+        self._analysis_results_store[session_id] = {
+            "basic_stats": {},
+            "column_stats": {},
+            "chart_data": [],
+            "key_findings": [],
+            "last_updated": datetime.now()
         }
         return session
 
@@ -83,6 +98,9 @@ class SessionManager:
         # 清理内存中的会话数据
         del self._sessions[session_id]
         del self._data_store[session_id]
+        # 清理共享分析结果存储
+        if session_id in self._analysis_results_store:
+            del self._analysis_results_store[session_id]
         return True
 
     def add_message(self, session_id: str, role: MessageRole, content: str) -> Message:
@@ -115,13 +133,15 @@ class SessionManager:
 
     def store_file_data(self, session_id: str, file_id: str, data: dict) -> None:
         """存储文件数据（按 sheet 页分开）"""
+        start_time = time.time()
+
         # 检查会话是否存在
         if session_id not in self._sessions:
+            logger.error(f"[SESSION_MANAGER] store_file_data 失败：session_id '{session_id}' 不存在")
             raise ValueError(f"Session {session_id} not found")
 
         # 如果 _data_store[session_id] 不存在，初始化它
         if session_id not in self._data_store:
-            print(f"[DEBUG] store_file_data - _data_store[{session_id}] 不存在，正在初始化")
             self._data_store[session_id] = {
                 "files_data": {},
                 "analysis_results": {},
@@ -129,47 +149,98 @@ class SessionManager:
             }
 
         self._data_store[session_id]["files_data"][file_id] = data
-        print(f"[DEBUG] store_file_data - 已存储文件数据，file_id: {file_id}, sheet 数量：{len(data)}")
+
+        elapsed = time.time() - start_time
+        logger.info(f"[SESSION_MANAGER] store_file_data 完成", extra={
+            "session_id": session_id,
+            "file_id": file_id,
+            "sheet_count": len(data),
+            "execution_time": elapsed,
+            "action": "store_file_data"
+        })
 
     def get_file_data(self, session_id: str, file_id: str) -> Optional[dict]:
         """获取文件数据"""
+        start_time = time.time()
+
         # 检查会话是否存在
         if session_id not in self._sessions:
-            print(f"[DEBUG] get_file_data - session_id '{session_id}' 不存在于 sessions")
+            logger.warning(f"[SESSION_MANAGER] get_file_data: session_id '{session_id}' 不存在")
             return None
 
-        # 检查 _data_store[session_id] 是否存在，不存在则返回 None（不自动初始化）
+        # 检查 _data_store[session_id] 是否存在
         if session_id not in self._data_store:
-            print(f"[DEBUG] get_file_data - _data_store[{session_id}] 不存在，文件数据可能已丢失或会话已重置")
+            logger.warning(f"[SESSION_MANAGER] get_file_data: _data_store[{session_id}] 不存在")
             return None
 
         files_data = self._data_store[session_id].get("files_data", {})
-        print(f"[DEBUG] get_file_data - files_data keys: {list(files_data.keys())}, 请求的 file_id: {file_id}")
-
         result = files_data.get(file_id)
-        if result:
-            print(f"[DEBUG] get_file_data - 成功获取数据，sheet 数量：{len(result)}")
-        else:
-            print(f"[DEBUG] get_file_data - 未找到 file_id '{file_id}' 的数据，可用 file_id: {list(files_data.keys())}")
+
+        elapsed = time.time() - start_time
+        logger.info(f"[SESSION_MANAGER] get_file_data {'成功' if result else '未找到'}", extra={
+            "session_id": session_id,
+            "file_id": file_id,
+            "found": result is not None,
+            "execution_time": elapsed,
+            "action": "get_file_data"
+        })
+
         return result
 
     def store_analysis_result(self, session_id: str, result: dict) -> None:
         """存储分析结果"""
+        start_time = time.time()
+
         if session_id not in self._data_store:
+            logger.error(f"[SESSION_MANAGER] store_analysis_result 失败：session_id '{session_id}' 不存在")
             raise ValueError(f"Session {session_id} not found")
+
         self._data_store[session_id]["analysis_results"] = result
+
+        elapsed = time.time() - start_time
+        logger.info(f"[SESSION_MANAGER] store_analysis_result 完成", extra={
+            "session_id": session_id,
+            "execution_time": elapsed,
+            "action": "store_analysis_result"
+        })
 
     def get_analysis_result(self, session_id: str) -> Optional[dict]:
         """获取分析结果"""
+        start_time = time.time()
+
         if session_id not in self._data_store:
+            logger.warning(f"[SESSION_MANAGER] get_analysis_result: session_id '{session_id}' 不存在")
             return None
-        return self._data_store[session_id].get("analysis_results", {})
+
+        result = self._data_store[session_id].get("analysis_results", {})
+
+        elapsed = time.time() - start_time
+        logger.info(f"[SESSION_MANAGER] get_analysis_result {'成功' if result else '空'}", extra={
+            "session_id": session_id,
+            "has_data": bool(result),
+            "execution_time": elapsed,
+            "action": "get_analysis_result"
+        })
+
+        return result
 
     def store_charts(self, session_id: str, charts: list) -> None:
         """存储图表数据"""
+        start_time = time.time()
+
         if session_id not in self._data_store:
+            logger.error(f"[SESSION_MANAGER] store_charts 失败：session_id '{session_id}' 不存在")
             raise ValueError(f"Session {session_id} not found")
+
         self._data_store[session_id]["charts"] = charts
+
+        elapsed = time.time() - start_time
+        logger.info(f"[SESSION_MANAGER] store_charts 完成", extra={
+            "session_id": session_id,
+            "chart_count": len(charts),
+            "execution_time": elapsed,
+            "action": "store_charts"
+        })
 
     def get_charts(self, session_id: str) -> list:
         """获取图表数据"""
@@ -318,3 +389,87 @@ class SessionManager:
         if session_id not in self._sessions:
             return None
         return self._sessions[session_id].report_id
+
+    # ========== 共享分析结果存储方法（新增） ==========
+
+    def store_analysis_result(self, session_id: str, result: Dict) -> None:
+        """
+        存储分析结果到共享存储（Tool-Calling Agent 调用）
+
+        :param session_id: 会话 ID
+        :param result: 分析结果字典，可包含 basic_stats, column_stats, charts 等
+        """
+        if session_id not in self._analysis_results_store:
+            self._analysis_results_store[session_id] = {
+                "basic_stats": {},
+                "column_stats": {},
+                "chart_data": [],
+                "key_findings": [],
+                "last_updated": datetime.now()
+            }
+
+        existing = self._analysis_results_store[session_id]
+
+        # 合并分析结果
+        if result.get("basic_stats"):
+            existing["basic_stats"].update(result["basic_stats"])
+        if result.get("column_stats"):
+            existing["column_stats"].update(result["column_stats"])
+        if result.get("charts"):
+            existing["chart_data"].extend(result["charts"])
+        if result.get("key_findings"):
+            existing["key_findings"].extend(result["key_findings"])
+
+        existing["last_updated"] = datetime.now()
+        print(f"[SessionManager] 已存储分析结果到共享存储，session_id: {session_id}")
+
+    def get_analysis_results(self, session_id: str) -> Optional[Dict]:
+        """
+        获取共享分析结果（ReportAgent 调用）
+
+        :param session_id: 会话 ID
+        :return: 分析结果字典，包含 basic_stats, column_stats, chart_data, key_findings 等
+        """
+        return self._analysis_results_store.get(session_id)
+
+    def clear_analysis_results(self, session_id: str) -> None:
+        """
+        清空共享分析结果（会话结束时调用）
+
+        :param session_id: 会话 ID
+        """
+        if session_id in self._analysis_results_store:
+            del self._analysis_results_store[session_id]
+            print(f"[SessionManager] 已清空分析结果，session_id: {session_id}")
+
+    def merge_analysis_result(self, session_id: str, result: Dict) -> None:
+        """
+        合并分析结果到共享存储（支持增量更新）
+
+        :param session_id: 会话 ID
+        :param result: 分析结果字典
+        """
+        self.store_analysis_result(session_id, result)
+
+    def store_analysis_context(self, session_id: str, context: AnalysisContext) -> None:
+        """
+        存储分析上下文（用于 ReportAgent）
+
+        :param session_id: 会话 ID
+        :param context: AnalysisContext 对象
+        """
+        if session_id not in self._data_store:
+            self._data_store[session_id] = {}
+        self._data_store[session_id]["analysis_context"] = context
+        print(f"[SessionManager] 已存储分析上下文，session_id: {session_id}, request_id: {context.request_id}")
+
+    def get_analysis_context(self, session_id: str) -> Optional[AnalysisContext]:
+        """
+        获取分析上下文
+
+        :param session_id: 会话 ID
+        :return: AnalysisContext 对象或 None
+        """
+        if session_id not in self._data_store:
+            return None
+        return self._data_store[session_id].get("analysis_context")

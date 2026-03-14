@@ -7,16 +7,15 @@ import json
 from typing import Optional
 from pydantic import BaseModel
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Query
-from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.background import BackgroundTasks
+from fastapi.responses import HTMLResponse
 import uvicorn
 
 from backend.config import UPLOAD_DIR, REPORTS_DIR, DASHSCOPE_MODEL, DASHSCOPE_API_KEY
 from backend.models.schemas import (
     CreateSessionRequest, CreateSessionResponse,
     SessionListResponse, UploadFileResponse,
-    ChatRequest, ChatResponse, ReportResponse
+    ReportResponse
 )
 from backend.services.session_manager import SessionManager
 from backend.utils.file_handler import FileHandler
@@ -26,12 +25,10 @@ from backend.utils.chart_builder import ChartBuilder
 import dashscope
 from backend.agents.registry import ToolRegistry
 from backend.agents.tool_calling import ToolCallingAgent
-from backend.agents.report_agent import ReportAgent
 from backend.tools.data_tools import AnalyzeDataTool, GetColumnDistributionTool, GetColumnStatisticsTool
 from backend.tools.chart_tools import GenerateChartTool, GenerateCorrelationHeatmapTool, AutoGenerateChartsTool
 from backend.tools.report_tools import GenerateDynamicReportTool, GetReportTool
 from backend.websocket_manager import ws_manager
-from backend.utils.performance_logger import get_perf_logger, track_performance
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -49,16 +46,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 请求模型
-class GenerateReportRequest(BaseModel):
-    user_request: str  # 用户分析请求
+# 全局变量
 
 # 全局变量
 session_manager = SessionManager()
 
 # 初始化新的 Tool-Calling Agent
 tool_registry = ToolRegistry()
-ai_agent = ToolCallingAgent(tool_registry)
+ai_agent = ToolCallingAgent(tool_registry, session_manager)
 
 # 注册所有工具
 tool_registry.register(AnalyzeDataTool(session_manager))
@@ -147,86 +142,6 @@ async def upload_file(session_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"上传失败：{str(e)}")
 
 
-# ==================== 聊天交互 ====================
-
-@app.post("/api/sessions/{session_id}/chat", response_model=ChatResponse)
-async def chat(session_id: str, request: ChatRequest):
-    """发送消息进行对话 - 使用新的 Tool-Calling Agent"""
-    import time
-    perf = get_perf_logger()
-    perf.reset()
-
-    # 开始性能追踪
-    perf.start("chat_total")
-    perf.start("chat_setup")
-
-    # 检查会话是否存在
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-
-    # 检查是否配置了 API 密钥
-    api_key = os.getenv("DASHSCOPE_API_KEY", "")
-    if api_key:
-        ai_agent.api_key = api_key
-        dashscope.api_key = api_key
-
-    try:
-        # 获取所有 sheet 信息
-        sheets_info_start = time.time()
-        sheets_info = FileHandler.get_all_sheets_info(session_manager, session_id)
-        sheets_info_time = time.time() - sheets_info_start
-        perf.log("chat_get_sheets_info", sheets_info_time)
-
-        perf.end("chat_setup")
-
-        # 构建上下文
-        context = {
-            "session_id": session_id,
-            "sheets_info": sheets_info,
-            "history": session_manager.get_conversation_history(session_id, limit=10)
-        }
-
-        # 运行 Agent（自主决定调用工具）
-        perf.start("chat_agent_run")
-        response_text, tool_results = await ai_agent.run(request.message, context, perf)
-        perf.end("chat_agent_run")
-
-        # 添加用户消息
-        session_manager.add_message(session_id, "user", request.message)
-        session_manager.add_message(session_id, "assistant", response_text)
-
-        # 检查是否有工具执行结果需要处理
-        is_clarifying = False
-        clarification_question = None
-        report_url = None
-
-        for result in tool_results:
-            if result.data and isinstance(result.data, dict):
-                if result.data.get('report_id'):
-                    report_url = f"/api/reports/{result.data['report_id']}"
-
-        perf.end("chat_total")
-        perf.log("chat_response_length", len(response_text))
-
-        # 输出性能摘要
-        print(f"\n[PERF] 聊天请求性能摘要:")
-        print(perf.summary())
-        print()
-
-        return ChatResponse(
-            response=response_text,
-            report_url=report_url,
-            is_clarifying=is_clarifying,
-            clarification_question=clarification_question
-        )
-
-    except Exception as e:
-        perf.end("chat_total")
-        print(f"[PERF] 聊天请求失败，总耗时：{perf.get_total():.3f}s")
-        raise HTTPException(status_code=500, detail=f"AI 服务异常：{str(e)}")
-
-
 # ==================== WebSocket 进度通知 ====================
 
 @app.websocket("/ws/progress/{session_id}")
@@ -249,6 +164,9 @@ async def chat_stream(session_id: str, websocket: WebSocket, message: str = Quer
     message: 用户消息，通过 WebSocket URL 查询参数传递，如：
              ws://host/api/sessions/xxx/chat/stream?message=你好
     """
+    # 允许的非分析类消息关键词（未上传文件时允许发送）
+    ALLOWED_FILELESS_MESSAGES = ["你好", "hello", "hi", "帮助", "help", "你能做什么", "功能", "介绍", "欢迎"]
+
     session = session_manager.get_session(session_id)
     if not session:
         await websocket.accept()
@@ -272,6 +190,17 @@ async def chat_stream(session_id: str, websocket: WebSocket, message: str = Quer
 
     try:
         user_message = message.strip()
+
+        # 检查是否上传了文件
+        files = session.files
+        user_message_lower = user_message.lower()
+
+        # 如果没有文件，且消息不是问候/帮助类消息
+        if len(files) == 0 and not any(kw in user_message_lower for kw in ALLOWED_FILELESS_MESSAGES):
+            await websocket.accept()
+            await ws_manager.send_message(session_id, "chat_chunk", {"text": "请先上传数据文件（CSV 或 Excel 格式），我将为您进行数据分析。"})
+            await ws_manager.send_message(session_id, "chat_complete", {"response": "请先上传数据文件（CSV 或 Excel 格式），我将为您进行数据分析。"})
+            return
 
         await ws_manager.send_message(session_id, "chat_start", {})
 
@@ -319,58 +248,6 @@ async def chat_stream(session_id: str, websocket: WebSocket, message: str = Quer
         await ws_manager.send_message(session_id, "error", {"message": f"AI 服务异常：{str(e)}"})
     finally:
         ws_manager.disconnect(websocket, session_id)
-
-
-# ==================== 智能报告生成 ====================
-
-@app.post("/api/sessions/{session_id}/generate-report")
-async def trigger_report_generation(
-    session_id: str,
-    request: GenerateReportRequest,
-    background_tasks: BackgroundTasks
-):
-    """
-    触发智能报告生成
-
-    报告生成是异步的，通过 WebSocket 推送进度
-    """
-    # 检查会话是否存在
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-
-    # 创建 ReportAgent
-    report_agent = ReportAgent(session_manager, DASHSCOPE_API_KEY)
-
-    # 进度回调函数
-    async def progress_callback(progress: dict):
-        await ws_manager.broadcast_progress(session_id, progress)
-
-    # 后台执行报告生成
-    async def generate():
-        try:
-            report_id = await report_agent.generate_report(
-                session_id=session_id,
-                user_request=request.user_request,
-                progress_callback=progress_callback
-            )
-            # 报告生成完成
-            await ws_manager.broadcast_progress(session_id, {
-                'stage': 'complete',
-                'report_id': report_id
-            })
-        except Exception as e:
-            await ws_manager.broadcast_progress(session_id, {
-                'stage': 'error',
-                'error': str(e)
-            })
-
-    background_tasks.add_task(generate)
-
-    return {
-        "status": "started",
-        "message": "报告生成已启动，请通过 WebSocket 接收进度通知"
-    }
 
 
 # ==================== 图表数据 ====================

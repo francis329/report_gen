@@ -40,6 +40,17 @@ class ClarificationState(BaseModel):
     ambiguous_aspects: List[str] = []     # 需要澄清的方面
 
 
+class AnalysisContext(BaseModel):
+    """分析上下文 - 用于 Tool-Calling Agent 与 ReportAgent 之间的数据共享"""
+    request_id: str                       # 分析请求 ID
+    user_request: str                     # 用户原始请求
+    needs_report: bool = False            # 是否需要生成报告
+    data_snapshot: Dict[str, Any] = {}    # 数据快照（文件 ID、sheet 名称、行数等）
+    analysis_summary: List[str] = []      # 分析摘要/关键发现
+    analysis_results: Dict[str, Any] = {} # 详细分析结果（基本统计、列统计、图表数据等）
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class Session(BaseModel):
     """会话"""
     id: str
@@ -67,17 +78,6 @@ class SessionListResponse(BaseModel):
 class UploadFileResponse(BaseModel):
     file_info: FileInfo
     message: str
-
-
-class ChatRequest(BaseModel):
-    message: str
-
-
-class ChatResponse(BaseModel):
-    response: str
-    report_url: Optional[str] = None
-    is_clarifying: bool = False           # 是否处于澄清状态
-    clarification_question: Optional[str] = None  # 澄清问题（如果有）
 
 
 class ReportResponse(BaseModel):

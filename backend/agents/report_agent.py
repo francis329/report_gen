@@ -8,6 +8,7 @@ from typing import Dict, Optional, Callable, Any
 from pathlib import Path
 
 from backend.models.report import ReportPlan, ChapterResult, ReportExecutionResult
+from backend.models.schemas import AnalysisContext
 from backend.agents.report_planner import ReportPlanner
 from backend.agents.report_executor import ReportExecutor
 from backend.services.session_manager import SessionManager
@@ -51,13 +52,50 @@ class ReportAgent:
         print(f"[REPORT_AGENT] 开始生成报告，session_id: {session_id}")
         print(f"[REPORT_AGENT] 用户请求：{user_request}")
         try:
-            # ========== Phase 1: 规划 ==========
-            print(f"[REPORT_AGENT] Phase 1: 开始规划报告结构")
+            # ========== Phase 1: 创建分析上下文 ==========
+            print(f"[REPORT_AGENT] Phase 1: 创建分析上下文")
+            if progress_callback:
+                await progress_callback({
+                    "stage": "planning",
+                    "message": "正在读取分析结果...",
+                    "progress": 5
+                })
+
+            # 从共享存储中读取已有的分析结果
+            analysis_results = self.session_manager.get_analysis_results(session_id)
+            if not analysis_results:
+                print(f"[REPORT_AGENT] 警告：共享存储中没有分析结果，将基于当前数据生成报告")
+                analysis_results = {}
+
+            # 获取数据快照
+            files = self.session_manager.get_files(session_id)
+            data_snapshot = {
+                "file_ids": [f.id for f in files],
+                "sheet_names": [s.name for f in files for s in f.sheets],
+                "row_count": sum(s.row_count for f in files for s in f.sheets),
+                "column_count": len(set(c for s in files[0].sheets for c in s.columns)) if files else 0
+            }
+
+            # 创建分析上下文
+            analysis_context = AnalysisContext(
+                request_id=str(uuid.uuid4())[:8],
+                user_request=user_request,
+                needs_report=True,
+                data_snapshot=data_snapshot,
+                analysis_summary=analysis_results.get("key_findings", []),
+                analysis_results=analysis_results or {}
+            )
+
+            # 存储分析上下文
+            self.session_manager.store_analysis_context(session_id, analysis_context)
+
+            # ========== Phase 2: 规划 ==========
+            print(f"[REPORT_AGENT] Phase 2: 开始规划报告结构")
             if progress_callback:
                 await progress_callback({
                     "stage": "planning",
                     "message": "正在分析用户需求，生成报告结构...",
-                    "progress": 5
+                    "progress": 20
                 })
 
             # 生成报告规划
@@ -67,24 +105,24 @@ class ReportAgent:
                 await progress_callback({
                     "stage": "planning",
                     "message": f"报告结构已生成，共 {len(plan.chapters)} 个章节",
-                    "progress": 20
+                    "progress": 30
                 })
 
-            # ========== Phase 2: 执行 ==========
-            print(f"[REPORT_AGENT] Phase 2: 开始执行各章节分析")
+            # ========== Phase 3: 执行 ==========
+            print(f"[REPORT_AGENT] Phase 3: 开始执行各章节分析")
             if progress_callback:
                 await progress_callback({
                     "stage": "executing",
                     "message": "开始执行各章节分析...",
-                    "progress": 25
+                    "progress": 35
                 })
 
             execution_result = await self.executor.execute(
                 plan, session_id, progress_callback
             )
 
-            # ========== Phase 3: 生成 HTML ==========
-            print(f"[REPORT_AGENT] Phase 3: 开始生成 HTML 报告")
+            # ========== Phase 4: 生成 HTML ==========
+            print(f"[REPORT_AGENT] Phase 4: 开始生成 HTML 报告")
             if progress_callback:
                 await progress_callback({
                     "stage": "generating",

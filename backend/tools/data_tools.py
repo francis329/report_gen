@@ -257,7 +257,8 @@ class AnalyzeDataTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 ),
                 ToolParameter(
                     name="merge_sheets",
@@ -269,7 +270,7 @@ class AnalyzeDataTool(BaseTool):
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         session_id = kwargs.get("session_id")
         merge_sheets = kwargs.get("merge_sheets", False)
 
@@ -350,7 +351,8 @@ class GetColumnDistributionTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 ),
                 ToolParameter(
                     name="column_name",
@@ -367,7 +369,7 @@ class GetColumnDistributionTool(BaseTool):
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         session_id = kwargs.get("session_id")
         column_name = kwargs.get("column_name")
         top_n = kwargs.get("top_n", 10)
@@ -423,7 +425,8 @@ class GetColumnStatisticsTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 ),
                 ToolParameter(
                     name="column_name",
@@ -433,7 +436,7 @@ class GetColumnStatisticsTool(BaseTool):
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         session_id = kwargs.get("session_id")
         column_name = kwargs.get("column_name")
 

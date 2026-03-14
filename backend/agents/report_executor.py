@@ -3,6 +3,8 @@
 根据 ReportPlan 逐章执行分析，生成图表和数据
 """
 import uuid
+import time
+import logging
 from typing import Dict, List, Any, Optional, Callable
 import pandas as pd
 
@@ -11,6 +13,9 @@ from backend.models.report import (
 )
 from backend.services.session_manager import SessionManager
 from backend.utils.chart_builder import ChartBuilder
+
+# 配置日志
+logger = logging.getLogger('report_executor')
 
 
 class ReportExecutor:
@@ -41,15 +46,25 @@ class ReportExecutor:
         :param progress_callback: 进度回调函数 async def callback(progress: Dict)
         :return: 执行结果
         """
+        start_time = time.time()
         print(f"[REPORT_EXECUTOR] 开始执行报告生成，session_id: {session_id}")
         print(f"[REPORT_EXECUTOR] 报告标题：{plan.title}, 共 {len(plan.chapters)} 个章节")
+
+        logger.info(f"[REPORT_EXECUTOR] 开始执行报告生成", extra={
+            "session_id": session_id,
+            "report_title": plan.title,
+            "chapter_count": len(plan.chapters),
+            "action": "start"
+        })
 
         chapters_result = []
         total_chapters = len(plan.chapters)
         success_count = 0
         fail_count = 0
+        chapter_times = {}  # 记录每章耗时
 
         for i, chapter in enumerate(plan.chapters):
+            chapter_start = time.time()
             print(f"[REPORT_EXECUTOR] 执行章节 {i+1}/{total_chapters}: {chapter.title}")
             try:
                 # 进度回调
@@ -66,6 +81,9 @@ class ReportExecutor:
                 # 执行章节分析
                 chapter_data = await self._execute_chapter(chapter, session_id)
 
+                chapter_time = time.time() - chapter_start
+                chapter_times[chapter.id] = chapter_time
+
                 # 存储章节结果
                 self.session_manager.store_chapter_result(
                     session_id, chapter.id, chapter_data
@@ -77,14 +95,38 @@ class ReportExecutor:
                     "success": True
                 })
                 success_count += 1
-                print(f"[REPORT_EXECUTOR] 章节 {i+1}/{total_chapters} 执行成功")
+                print(f"[REPORT_EXECUTOR] 章节 {i+1}/{total_chapters} 执行成功，耗时：{chapter_time:.3f}s")
+
+                logger.info(f"[REPORT_EXECUTOR] 章节执行成功", extra={
+                    "session_id": session_id,
+                    "chapter_id": chapter.id,
+                    "chapter_title": chapter.title,
+                    "chapter_index": i + 1,
+                    "total_chapters": total_chapters,
+                    "execution_time": chapter_time,
+                    "action": "chapter_success"
+                })
 
             except Exception as e:
                 import traceback
                 error_detail = traceback.format_exc()
+                chapter_time = time.time() - chapter_start
                 print(f"[REPORT_EXECUTOR] 章节 {i+1}/{total_chapters} 执行失败：{e}")
                 print(f"[REPORT_EXECUTOR] 错误详情：{error_detail}")
                 fail_count += 1
+
+                logger.error(f"[REPORT_EXECUTOR] 章节执行失败", extra={
+                    "session_id": session_id,
+                    "chapter_id": chapter.id,
+                    "chapter_title": chapter.title,
+                    "chapter_index": i + 1,
+                    "total_chapters": total_chapters,
+                    "execution_time": chapter_time,
+                    "error": str(e),
+                    "traceback": error_detail,
+                    "action": "chapter_failure"
+                })
+
                 # 降级：记录失败但不中断
                 chapter_result = ChapterResult(
                     chapter_id=chapter.id,
@@ -103,13 +145,26 @@ class ReportExecutor:
                     "success": False
                 })
 
+        total_time = time.time() - start_time
+
         # 完成
-        print(f"[REPORT_EXECUTOR] 报告执行完成，成功：{success_count} 章，失败：{fail_count} 章")
+        print(f"[REPORT_EXECUTOR] 报告执行完成，成功：{success_count} 章，失败：{fail_count} 章，总耗时：{total_time:.3f}s")
         if progress_callback:
             await progress_callback({
                 "stage": "complete",
                 "progress": 100
             })
+
+        logger.info(f"[REPORT_EXECUTOR] 报告执行完成", extra={
+            "session_id": session_id,
+            "report_title": plan.title,
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "total_chapters": total_chapters,
+            "total_execution_time": total_time,
+            "chapter_times": chapter_times,
+            "action": "complete"
+        })
 
         return {
             "plan": plan,
@@ -129,16 +184,21 @@ class ReportExecutor:
         :param session_id: 会话 ID
         :return: 章节结果
         """
-        print(f"[REPORT_EXECUTOR] _execute_chapter: 开始执行章节 '{chapter.title}'")
-        print(f"[REPORT_EXECUTOR] _execute_chapter: 章节 ID: {chapter.id}, 分析类型指导：{chapter.analysis_guidance[:50] if chapter.analysis_guidance else '无'}")
+        start_time = time.time()
+        logger.info(f"[REPORT_EXECUTOR] 开始执行章节分析", extra={
+            "session_id": session_id,
+            "chapter_id": chapter.id,
+            "chapter_title": chapter.title,
+            "action": "chapter_start"
+        })
 
         # 获取数据
         df = self._get_session_dataframe(session_id)
-        print(f"[REPORT_EXECUTOR] _execute_chapter: 获取到 DataFrame: {len(df)}行 x {len(df.columns)}列")
+        logger.debug(f"[REPORT_EXECUTOR] 获取到 DataFrame: {len(df)}行 x {len(df.columns)}列")
 
         # 根据 analysis_guidance 推断分析类型
         analysis_type = self._infer_analysis_type(chapter.analysis_guidance, chapter.dimensions)
-        print(f"[REPORT_EXECUTOR] _execute_chapter: 推断分析类型为 '{analysis_type}'")
+        logger.debug(f"[REPORT_EXECUTOR] 推断分析类型为 '{analysis_type}'")
 
         result = ChapterResult(
             chapter_id=chapter.id,
@@ -150,69 +210,102 @@ class ReportExecutor:
             chart_spec=None
         )
 
-        # 根据分析类型执行具体逻辑
-        if analysis_type == "overview":
-            result.data = self._get_overview_stats(df)
-            result.insights = self._generate_overview_insights(result.data)
+        try:
+            # 根据分析类型执行具体逻辑
+            if analysis_type == "overview":
+                result.data = self._get_overview_stats(df)
+                result.insights = self._generate_overview_insights(result.data)
 
-        elif analysis_type == "ranking":
-            result.data = self._get_ranking_data(df, chapter.dimensions, chapter.analysis_guidance)
-            result.chart_spec = self._create_chart_spec("bar", result.data, chapter)
-            self._store_chart_query(session_id, chapter, result)
+            elif analysis_type == "ranking":
+                result.data = self._get_ranking_data(df, chapter.dimensions, chapter.analysis_guidance)
+                result.chart_spec = self._create_chart_spec("bar", result.data, chapter)
+                self._store_chart_query(session_id, chapter, result)
 
-        elif analysis_type == "trend":
-            result.data = self._get_trend_data(df, chapter.dimensions, chapter.analysis_guidance)
-            result.chart_spec = self._create_chart_spec("line", result.data, chapter)
-            self._store_chart_query(session_id, chapter, result)
+            elif analysis_type == "trend":
+                result.data = self._get_trend_data(df, chapter.dimensions, chapter.analysis_guidance)
+                result.chart_spec = self._create_chart_spec("line", result.data, chapter)
+                self._store_chart_query(session_id, chapter, result)
 
-        elif analysis_type == "distribution":
-            result.data = self._get_distribution_data(df, chapter.dimensions, chapter.analysis_guidance)
-            result.chart_spec = self._create_chart_spec("pie", result.data, chapter)
-            self._store_chart_query(session_id, chapter, result)
+            elif analysis_type == "distribution":
+                result.data = self._get_distribution_data(df, chapter.dimensions, chapter.analysis_guidance)
+                result.chart_spec = self._create_chart_spec("pie", result.data, chapter)
+                self._store_chart_query(session_id, chapter, result)
 
-        elif analysis_type == "comparison":
-            result.data = self._get_comparison_data(df, chapter.dimensions, chapter.analysis_guidance)
-            result.chart_spec = self._create_chart_spec("bar", result.data, chapter)
-            self._store_chart_query(session_id, chapter, result)
+            elif analysis_type == "comparison":
+                result.data = self._get_comparison_data(df, chapter.dimensions, chapter.analysis_guidance)
+                result.chart_spec = self._create_chart_spec("bar", result.data, chapter)
+                self._store_chart_query(session_id, chapter, result)
 
-        elif analysis_type == "correlation":
-            result.data = self._get_correlation_data(df, chapter.dimensions)
-            result.chart_spec = self._create_chart_spec("heatmap", result.data, chapter)
-            self._store_chart_query(session_id, chapter, result)
+            elif analysis_type == "correlation":
+                result.data = self._get_correlation_data(df, chapter.dimensions)
+                result.chart_spec = self._create_chart_spec("heatmap", result.data, chapter)
+                self._store_chart_query(session_id, chapter, result)
 
-        else:
-            # 默认按 ranking 处理
-            result.data = self._get_ranking_data(df, chapter.dimensions, chapter.analysis_guidance)
-            result.chart_spec = self._create_chart_spec("bar", result.data, chapter)
-            self._store_chart_query(session_id, chapter, result)
+            else:
+                # 默认按 ranking 处理
+                result.data = self._get_ranking_data(df, chapter.dimensions, chapter.analysis_guidance)
+                result.chart_spec = self._create_chart_spec("bar", result.data, chapter)
+                self._store_chart_query(session_id, chapter, result)
 
-        # 生成章节内容摘要
-        result.content = self._generate_chapter_content(result)
+            # 生成章节内容摘要
+            result.content = self._generate_chapter_content(result)
+
+            chapter_time = time.time() - start_time
+            logger.info(f"[REPORT_EXECUTOR] 章节分析完成", extra={
+                "session_id": session_id,
+                "chapter_id": chapter.id,
+                "chapter_title": chapter.title,
+                "analysis_type": analysis_type,
+                "execution_time": chapter_time,
+                "data_keys": list(result.data.keys()) if result.data else [],
+                "insights_count": len(result.insights),
+                "has_chart": result.chart_spec is not None,
+                "action": "chapter_complete"
+            })
+
+        except Exception as e:
+            chapter_time = time.time() - start_time
+            logger.error(f"[REPORT_EXECUTOR] 章节分析异常", extra={
+                "session_id": session_id,
+                "chapter_id": chapter.id,
+                "chapter_title": chapter.title,
+                "analysis_type": analysis_type,
+                "execution_time": chapter_time,
+                "error": str(e),
+                "action": "chapter_exception"
+            })
+            raise
 
         return result
 
     def _get_session_dataframe(self, session_id: str) -> pd.DataFrame:
         """获取会话的 DataFrame"""
-        print(f"[REPORT_EXECUTOR] _get_session_dataframe: 开始获取文件列表，session_id: {session_id}")
+        logger.info(f"[REPORT_EXECUTOR] 开始获取文件列表", extra={
+            "session_id": session_id,
+            "action": "get_files"
+        })
         files = self.session_manager.get_files(session_id)
-        print(f"[REPORT_EXECUTOR] _get_session_dataframe: 获取到 {len(files)} 个文件")
+        logger.debug(f"[REPORT_EXECUTOR] 获取到 {len(files)} 个文件")
         if not files:
-            print(f"[REPORT_EXECUTOR] _get_session_dataframe: 错误 - 会话中没有数据文件")
+            logger.error(f"[REPORT_EXECUTOR] 会话中没有数据文件", extra={
+                "session_id": session_id
+            })
             raise ValueError("会话中没有数据文件")
 
-        # 遍历所有文件，找到第一个有数据的文件（与 analyze_data 工具保持一致的逻辑）
+        # 遍历所有文件，找到第一个有数据的文件
         for f in files:
-            print(f"[REPORT_EXECUTOR] _get_session_dataframe: 尝试获取文件 ID: {f.id}, 文件名：{f.filename if hasattr(f, 'filename') else 'N/A'}")
-            file_data = self.session_manager.get_file_data(session_id, f.id)
-            print(f"[REPORT_EXECUTOR] _get_session_dataframe: 文件数据获取结果：{'成功' if file_data else '失败'}")
+            file_id = f.id
+            file_name = f.filename if hasattr(f, 'filename') else 'N/A'
+            logger.debug(f"[REPORT_EXECUTOR] 尝试获取文件：{file_name} (ID: {file_id})")
+            file_data = self.session_manager.get_file_data(session_id, file_id)
             if file_data:
-                print(f"[REPORT_EXECUTOR] _get_session_dataframe: Sheet 数量：{len(file_data)}")
+                logger.debug(f"[REPORT_EXECUTOR] 成功获取文件数据，Sheet 数量：{len(file_data)}")
                 df = list(file_data.values())[0]
-                print(f"[REPORT_EXECUTOR] _get_session_dataframe: 返回 DataFrame: {len(df)}行 x {len(df.columns)}列")
+                logger.debug(f"[REPORT_EXECUTOR] 返回 DataFrame: {len(df)}行 x {len(df.columns)}列")
                 return df
 
-        # 所有文件都无法获取数据，尝试从文件系统重新加载
-        print(f"[REPORT_EXECUTOR] _get_session_dataframe: 内存中无数据，尝试从文件系统重新加载...")
+        # 所有文件都无法获取数据
+        logger.error(f"[REPORT_EXECUTOR] 内存中无数据，尝试从文件系统重新加载失败")
         raise ValueError("无法获取数据：文件已上传但数据未加载到内存中，请尝试重新上传文件或刷新会话")
 
     def _infer_analysis_type(self, guidance: str, dimensions: List[str]) -> str:
@@ -296,8 +389,10 @@ class ReportExecutor:
             col = dimensions[0]
             if col in df.columns:
                 if df[col].dtype in ["object", "category"]:
-                    # 分类型：按频次排名
-                    ranking = df[col].value_counts().head(10).to_dict()
+                    # 分类型：按频次排名（过滤 nan 值）
+                    ranking = df[col].dropna().value_counts().head(10).to_dict()
+                    # 过滤掉 key 为'nan'或空字符串的项
+                    ranking = {k: v for k, v in ranking.items() if pd.notna(k) and str(k).strip() != ''}
                     return {
                         "ranking": ranking,
                         "dimension": col,
@@ -306,11 +401,12 @@ class ReportExecutor:
                 else:
                     # 数值型：取 TOP10
                     sorted_df = df.nlargest(10, col)
-                    # 修复：使用 iterrows 或直接使用 values 来获取键值对
                     ranking_data = sorted_df[[col]].drop_duplicates().head(10)
                     ranking = {}
                     for idx, row in ranking_data.iterrows():
-                        ranking[str(row[col])] = idx
+                        val = row[col]
+                        if pd.notna(val):  # 过滤 nan 值
+                            ranking[str(val)] = int(val)
                     return {
                         "ranking": ranking,
                         "dimension": col,
@@ -355,11 +451,14 @@ class ReportExecutor:
         if len(dimensions) >= 1:
             col = dimensions[0]
             if col in df.columns:
-                dist = df[col].value_counts().to_dict()
+                # 过滤 nan 值后统计分布
+                dist = df[col].dropna().value_counts().to_dict()
+                # 过滤掉 key 为'nan'或空字符串的项
+                dist = {str(k): int(v) for k, v in dist.items() if pd.notna(k) and str(k).strip() != ''}
                 return {
-                    "distribution": {str(k): int(v) for k, v in dist.items()},
+                    "distribution": dist,
                     "dimension": col,
-                    "total": len(df)
+                    "total": sum(dist.values())
                 }
         return {"distribution": {}, "dimension": None, "total": 0}
 
@@ -374,8 +473,10 @@ class ReportExecutor:
             col = dimensions[0]
             if col in df.columns:
                 if df[col].dtype in ["object", "category"]:
-                    # 分类型：统计信息
-                    stats = df[col].value_counts().to_dict()
+                    # 分类型：统计信息（过滤 nan 值）
+                    stats = df[col].dropna().value_counts().to_dict()
+                    # 过滤掉 key 为'nan'或空字符串的项
+                    stats = {k: v for k, v in stats.items() if pd.notna(k) and str(k).strip() != ''}
                     return {"comparison": stats, "dimension": col, "type": "categorical"}
                 else:
                     # 数值型：描述统计

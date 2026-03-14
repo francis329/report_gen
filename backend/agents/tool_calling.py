@@ -14,6 +14,7 @@ from backend.config import DASHSCOPE_API_KEY, DASHSCOPE_MODEL
 from backend.agents.registry import ToolRegistry
 from backend.agents.base import BaseAgent
 from backend.tools.base import ToolResult
+from backend.services.session_manager import SessionManager
 
 
 class ToolCallingAgent(BaseAgent):
@@ -28,9 +29,13 @@ class ToolCallingAgent(BaseAgent):
     5. 生成最终回复
     """
 
+    # 允许的非分析类消息关键词（未上传文件时允许发送）
+    ALLOWED_FILELESS_MESSAGES = ["你好", "hello", "hi", "帮助", "help", "你能做什么", "功能", "介绍", "欢迎"]
+
     def __init__(
         self,
         tool_registry: ToolRegistry,
+        session_manager: Optional[SessionManager] = None,
         api_key: Optional[str] = None,
         model: str = DASHSCOPE_MODEL
     ):
@@ -38,19 +43,165 @@ class ToolCallingAgent(BaseAgent):
         初始化 Agent
 
         :param tool_registry: 工具注册中心
+        :param session_manager: 会话管理器（用于共享存储）
         :param api_key: API 密钥
         :param model: 模型名称
         """
         self.tool_registry = tool_registry
+        self.session_manager = session_manager
         self.api_key = api_key or DASHSCOPE_API_KEY
         self.model = model
 
         if self.api_key:
             dashscope.api_key = self.api_key
 
+    def _format_sheets_info(self, sheets_info: List[Dict]) -> str:
+        """格式化 sheet 信息用于提示词"""
+        if not sheets_info:
+            return "暂无数据"
+
+        sheets_desc = []
+        for sheet in sheets_info:
+            desc = f"- {sheet.get('file_name', '')} ({sheet.get('sheet_name', '')}): "
+            desc += f"{sheet.get('row_count', 0)}行，{len(sheet.get('columns', []))}列"
+            columns = sheet.get('columns', [])
+            if columns:
+                desc += f"\n  列：{', '.join(columns[:10])}{'...' if len(columns) > 10 else ''}"
+            sheets_desc.append(desc)
+
+        return "\n".join(sheets_desc)
+
+    def _build_clarification_prompt(self, context: Dict) -> str:
+        """
+        构建澄清模式提示词（Stage 1：意图澄清阶段）
+
+        :param context: 上下文信息
+        :return: 澄清提示词
+        """
+        sheets_info = context.get("sheets_info", [])
+
+        return f"""你是数据分析助手的意图澄清模块。
+
+可用数据：{self._format_sheets_info(sheets_info)}
+
+【任务】分析用户需求，判断是否需要进一步澄清：
+
+1. 如果用户需求模糊（如"分析一下"、"看看数据"等），请生成一个澄清问题
+2. 如果用户需求清晰，输出特殊标记 {{CONTINUE}}
+3. 无论需求是否清晰，都要确认：是否需要生成正式报告？
+
+【输出格式】
+- 需要澄清：{{"needs_clarification": true, "question": "你的问题", "needs_report": false}}
+- 需求清晰：{{"needs_clarification": false, "continue": true, "needs_report": false}}
+
+【示例】
+用户："分析一下销售数据"
+输出：{{"needs_clarification": true, "question": "请问您想从哪些方面分析销售数据？比如：销售趋势、地区分布、产品排名、时间对比等", "needs_report": false}}
+
+用户："查看各地区销售总额排名，并生成报告"
+输出：{{"needs_clarification": false, "continue": true, "needs_report": true}}
+
+用户："你好，你能做什么？"
+输出：{{"needs_clarification": false, "continue": true, "needs_report": false}}
+"""
+
+    async def _clarification_stage(
+        self,
+        user_message: str,
+        context: Dict
+    ) -> Tuple[bool, Optional[str], bool]:
+        """
+        意图澄清阶段（Stage 1）
+
+        :param user_message: 用户消息
+        :param context: 上下文（包含 sheets_info 等）
+        :return: (需求是否清晰，澄清问题/None, 是否需要生成报告)
+        """
+        messages = [{"role": "user", "content": user_message}]
+        system_prompt = self._build_clarification_prompt(context)
+
+        response, error = self._call_llm_sync(messages=messages, system_prompt=system_prompt)
+
+        if error:
+            print(f"[CLARIFICATION] LLM 调用失败，默认继续：{error}")
+            return True, None, False  # LLM 失败，默认继续
+
+        parsed = self._parse_response(response)
+
+        needs_clarification = parsed.get("needs_clarification", False)
+        question = parsed.get("question") if needs_clarification else None
+        needs_report = parsed.get("needs_report", False)
+
+        if parsed.get("continue") or not needs_clarification:
+            print(f"[CLARIFICATION] 需求清晰，needs_report={needs_report}")
+            return True, None, needs_report
+
+        print(f"[CLARIFICATION] 需要澄清：{question}")
+        return False, question, needs_report
+
+    def _call_llm_sync(
+        self,
+        messages: List[Dict],
+        system_prompt: str
+    ) -> Tuple[str, Optional[str]]:
+        """
+        同步调用 LLM（用于澄清阶段等简单场景）
+
+        :param messages: 消息历史
+        :param system_prompt: 系统提示词
+        :return: (响应内容，错误信息)
+        """
+        # 构建 API 消息格式
+        api_messages = [
+            {"role": "system", "content": system_prompt}
+        ]
+
+        for msg in messages:
+            content = msg["content"]
+            if isinstance(content, str):
+                content = [{"text": content}]
+            elif isinstance(content, dict):
+                content = [{"text": json.dumps(content)}]
+            api_messages.append({"role": msg["role"], "content": content})
+
+        try:
+            response = MultiModalConversation.call(
+                model=self.model,
+                api_key=self.api_key,
+                messages=api_messages,
+                result_format='message',
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                content = response.output.choices[0].message.content
+
+                if isinstance(content, list):
+                    text = ' '.join(
+                        item.get('text', '') if isinstance(item, dict) else str(item)
+                        for item in content
+                    )
+                    return text, None
+                elif isinstance(content, dict):
+                    text = content.get('text', '')
+                    return text, None
+                text = str(content) if content else ""
+                return text, None
+
+            else:
+                return "", f"API 错误：{response.code} - {response.message}"
+
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"[ERROR] LLM 调用异常：{error_detail}")
+            return "", f"异常：{type(e).__name__} - {str(e)}"
+
     def _build_system_prompt(self, context: Dict[str, Any]) -> str:
         """
-        构建系统提示词
+        构建系统提示词（Stage 2：工具调用模式）
+
+        前置条件：用户需求已明确，进入数据分析阶段
 
         :param context: 上下文信息
         :return: 系统提示词
@@ -81,7 +232,7 @@ class ToolCallingAgent(BaseAgent):
                 tool_examples.append(f"  {tool.definition.name}: {example}")
         examples_text = chr(10).join(tool_examples) if tool_examples else "暂无示例"
 
-        return f"""你是智能数据分析助手，可调用工具分析数据。
+        return f"""你是智能数据分析助手，专注于数据分析任务。
 
 可用数据：{chr(10).join(sheets_desc) if sheets_desc else '暂无数据'}
 可用工具：{', '.join(tools_desc) if tools_desc else '暂无'}
@@ -103,18 +254,19 @@ class ToolCallingAgent(BaseAgent):
 
 注意：不能同时返回 tool_call 和 response，每次只能选择一种格式！
 
-工作流程：
-1. 用户上传文件后：确认接收，简述数据结构，询问分析需求（不要自动调用工具）
-2. 用户请求分析时：先调用 analyze_data，再根据需求决定是否生成图表
-3. 用户请求图表时：调用 generate_chart 或 auto_generate_charts
-4. 用户明确请求生成报告（如"生成分析报告"、"生成报告"等关键词）时：立即调用 generate_dynamic_report 工具
-5. 重要：即使用户是第一次请求，只要明确要求生成报告，就必须调用 generate_dynamic_report 工具生成，不能仅回复消息
-6. 关键规则：当用户消息中包含"并生成报告"、"生成分析报告"、"生成报告"等明确请求时，必须在调用 analyze_data 分析数据后，紧接着调用 generate_dynamic_report 生成报告，这是强制要求
+【核心职责】
+根据用户已明确的需求，调用合适的工具进行数据分析：
 
-注意：
-- 不要自动生成图表，仅在用户明确要求或分析需要时调用
-- 支持多轮分析，可在一次对话中连续调用多个工具
-- 回复要简洁专业，包含数据洞察和建议
+1. 数据探索：调用 analyze_data 获取基础统计
+2. 分布分析：调用 get_column_distribution 分析列分布
+3. 统计分析：调用 get_column_statistics 获取详细统计
+4. 可视化：调用 generate_chart / generate_correlation_heatmap 生成图表
+
+【注意事项】
+- 每次只选择一种格式
+- 工具调用后将结果反馈给 LLM
+- 分析完成后总结结果并回复用户
+- 报告生成由独立模块处理，无需关注
 """
 
     async def run(
@@ -131,26 +283,57 @@ class ToolCallingAgent(BaseAgent):
         :param perf: 可选的性能记录器
         :return: (最终回复，工具执行结果列表)
         """
+        # ========== Stage 1: 意图澄清阶段 ==========
+        print(f"[TOOL_CALLING_AGENT] Stage 1: 开始意图澄清")
+        is_clear, clarification_question, needs_report = await self._clarification_stage(
+            user_message, context
+        )
+
+        if not is_clear and clarification_question:
+            # 需要澄清，直接返回澄清问题
+            print(f"[TOOL_CALLING_AGENT] 返回澄清问题：{clarification_question}")
+            return clarification_question, []
+
+        print(f"[TOOL_CALLING_AGENT] Stage 1 完成，需求清晰，needs_report={needs_report}")
+
+        # ========== Stage 2: 工具调用阶段 ==========
         # 初始化消息历史
         messages = [{"role": "user", "content": user_message}]
         tool_results: List[ToolResult] = []
         tool_call_history: List[str] = []  # 记录已调用的工具（防止重复循环）
         llm_call_count = 0
         tool_call_count = 0
+        consecutive_tool_failures = 0  # 连续工具失败次数（任务 10 优化）
+
+        # 循环控制配置（任务 10 优化）
+        MAX_LLM_CALLS = 20  # 最大 LLM 调用次数
+        MAX_TOOL_CALLS = 15  # 最大工具调用次数
+        MAX_CONSECUTIVE_FAILURES = 3  # 最大连续失败次数
 
         # 检测用户是否请求生成报告
         user_message_lower = user_message.lower()
         needs_report_generation = any(kw in user_message_lower for kw in [
             "生成报告", "生成分析报告", "并生成报告", "create report", "generate report"
-        ])
+        ]) or needs_report
+
         # 标记是否已调用 analyze_data（用于报告生成流程）
         analyze_data_called = False
         # 标记是否需要强制执行报告生成
         force_report_generation = needs_report_generation
 
-        # Agent 循环 - 移除硬性次数限制，使用智能退出机制
-        print(f"[TOOL_CALLING_AGENT] 开始 Agent 循环，force_report_generation={force_report_generation}")
+        # Agent 循环 - 智能退出机制（任务 10 优化）
+        print(f"[TOOL_CALLING_AGENT] Stage 2: 开始工具调用循环，force_report_generation={force_report_generation}")
+        print(f"[TOOL_CALLING_AGENT] 循环限制：MAX_LLM_CALLS={MAX_LLM_CALLS}, MAX_TOOL_CALLS={MAX_TOOL_CALLS}, MAX_CONSECUTIVE_FAILURES={MAX_CONSECUTIVE_FAILURES}")
         while True:
+            # 检查 LLM 调用次数限制（任务 10 优化）
+            if llm_call_count >= MAX_LLM_CALLS:
+                print(f"[TOOL_CALLING_AGENT] 达到 LLM 调用次数上限 ({MAX_LLM_CALLS})，结束循环")
+                messages.append({
+                    "role": "user",
+                    "content": "已达到最大分析轮次，请总结当前已完成的分析结果并回复用户。"
+                })
+                continue
+
             # 调用 LLM
             llm_start = time.time()
             response, error = self._call_llm(messages, context)
@@ -181,10 +364,14 @@ class ToolCallingAgent(BaseAgent):
                         "role": "user",
                         "content": f"工具 {tool_name} 已用相同参数调用过，请不要重复调用，直接总结分析结果。"
                     })
+                    consecutive_tool_failures += 1  # 重复调用视为失败
+                    if consecutive_tool_failures >= MAX_CONSECUTIVE_FAILURES:
+                        print(f"[TOOL_CALLING_AGENT] 连续失败 {consecutive_tool_failures} 次，强制退出")
+                        return "分析过程中遇到连续问题，已完成的分析结果请参考上文。", tool_results
                     continue
 
-                # 防止过多工具调用：超过 15 次后提醒 LLM 收敛
-                if len(tool_results) >= 15:
+                # 防止过多工具调用（任务 10 优化：更严格的限制）
+                if len(tool_results) >= MAX_TOOL_CALLS:
                     messages.append({
                         "role": "user",
                         "content": "已执行较多工具调用，请总结当前分析结果并回复用户。"
@@ -203,8 +390,9 @@ class ToolCallingAgent(BaseAgent):
                     })
                     continue
 
-                # 自动注入 session_id（如果参数中没有但 context 中有）
-                if "session_id" not in tool_args and "session_id" in context:
+                # 强制注入 session_id（覆盖 LLM 生成的值，因为 LLM 可能编造错误的 session_id）
+                # session_id 是系统级参数，必须由系统注入，不能依赖 LLM 提供
+                if "session_id" in context:
                     tool_args["session_id"] = context["session_id"]
 
                 # 执行工具
@@ -220,6 +408,31 @@ class ToolCallingAgent(BaseAgent):
 
                 tool_results.append(result)
 
+                # 将分析结果写入共享存储（任务 4）
+                if result.success and result.data and isinstance(result.data, dict):
+                    if self.session_manager and context.get("session_id"):
+                        # 提取分析相关的数据写入共享存储
+                        analysis_data = {}
+                        if tool_name == "analyze_data":
+                            analysis_data = result.data
+                        elif tool_name == "get_column_distribution":
+                            analysis_data = {"column_stats": {result.data.get("column_name", "unknown"): result.data}}
+                        elif tool_name == "get_column_statistics":
+                            analysis_data = {"column_stats": {result.data.get("column_name", "unknown"): result.data}}
+                        elif tool_name == "generate_chart":
+                            analysis_data = {"charts": result.data.get("charts", [])}
+                        elif tool_name == "generate_correlation_heatmap":
+                            analysis_data = {"charts": result.data.get("charts", [])}
+                        elif tool_name == "auto_generate_charts":
+                            analysis_data = {"charts": result.data.get("charts", []), "key_findings": result.data.get("findings", [])}
+
+                        if analysis_data:
+                            self.session_manager.store_analysis_result(
+                                session_id=context.get("session_id"),
+                                result=analysis_data
+                            )
+                            print(f"[TOOL_CALLING_AGENT] 已写入共享存储，tool: {tool_name}, session: {context.get('session_id')}")
+
                 # 将工具调用和结果添加到消息历史
                 # 注意：DashScope MultiModalConversation 不支持 role="tool"
                 # 所以使用 assistant + user 的组合来传递工具结果
@@ -229,18 +442,36 @@ class ToolCallingAgent(BaseAgent):
                     "content": f"正在处理{self._get_action_name(tool_name)}..."
                 })
 
-                # 工具执行失败时，不将详细错误消息添加到历史，避免 LLM 复述错误
-                # 而是用一个中性提示让 LLM 重试或跳过此工具
+                # 工具执行失败处理（任务 10 优化：连续失败检测）
                 if not result.success:
-                    messages.append({
-                        "role": "user",
-                        "content": f"{self._get_action_name(tool_name)}执行失败，请尝试其他方法或跳过此步骤。"
-                    })
+                    consecutive_tool_failures += 1
+                    print(f"[TOOL_CALLING_AGENT] 工具执行失败 #{consecutive_tool_failures}: {tool_name}")
+
+                    if consecutive_tool_failures >= MAX_CONSECUTIVE_FAILURES:
+                        # 连续失败次数过多，强制退出并反馈
+                        print(f"[TOOL_CALLING_AGENT] 连续失败 {consecutive_tool_failures} 次，强制退出循环")
+                        messages.append({
+                            "role": "user",
+                            "content": f"工具调用连续失败 {consecutive_tool_failures} 次，请停止调用工具，直接总结当前已完成的分析并回复用户。"
+                        })
+                        # 不立即 return，让 LLM 生成总结
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": f"{self._get_action_name(tool_name)}执行失败 ({consecutive_tool_failures}/{MAX_CONSECUTIVE_FAILURES})，请尝试其他方法或跳过此步骤。"
+                        })
                 else:
-                    messages.append({
-                        "role": "user",
-                        "content": self._get_tool_result_message(tool_name, result)
-                    })
+                    # 工具执行成功，重置失败计数器
+                    consecutive_tool_failures = 0
+                    # 当用户要求生成报告时，抑制中间工具执行结果的回复，避免输出"建议后续操作"等混淆内容
+                    if not force_report_generation:
+                        messages.append({
+                            "role": "user",
+                            "content": self._get_tool_result_message(tool_name, result)
+                        })
+                    else:
+                        # 报告生成流程中，只记录日志，不添加消息让 LLM 生成中间回复
+                        print(f"[TOOL_CALLING_AGENT] 工具执行成功（报告生成流程中，抑制中间回复）: {tool_name}")
 
                 # 跟踪 analyze_data 是否已调用
                 if tool_name == "analyze_data":
@@ -253,12 +484,10 @@ class ToolCallingAgent(BaseAgent):
                 # 检查是否已经完成了核心任务（如报告已生成），如果是则可以提前结束
                 if result.data and isinstance(result.data, dict):
                     if result.data.get('report_id'):
-                        # 报告已生成，可以提前结束，让 LLM 生成总结回复
-                        messages.append({
-                            "role": "user",
-                            "content": "报告已生成，请总结分析结果并告诉用户可以进行更多分析。"
-                        })
-                        force_report_generation = False  # 报告已生成，不需要强制
+                        # 报告已生成，直接返回，不再让 LLM 生成额外的"建议后续操作"回复
+                        # 前端会根据 report_url 自动显示报告操作按钮
+                        final_response = "✅ 报告已生成完成！"
+                        return final_response, tool_results
 
             elif "response" in parsed:
                 # 检查是否需要强制生成报告（用户明确要求但 LLM 没有调用）
@@ -286,6 +515,7 @@ class ToolCallingAgent(BaseAgent):
 
                             tool_results.append(result)
 
+                            await text_callback("\n\n正在生成报告...\n\n")
                             messages.append({
                                 "role": "assistant",
                                 "content": "正在生成报告..."
@@ -296,13 +526,10 @@ class ToolCallingAgent(BaseAgent):
                             })
 
                             if result.success and result.data and result.data.get('report_id'):
-                                # 报告生成成功，让 LLM 生成总结回复
-                                messages.append({
-                                    "role": "user",
-                                    "content": "报告已生成，请总结分析结果并告诉用户可以进行更多分析。"
-                                })
-                                # 再次调用 LLM 生成总结
-                                continue
+                                # 报告生成成功，直接返回，不再让 LLM 生成额外的"建议后续操作"回复
+                                # 前端会根据 report_url 自动显示报告操作按钮
+                                final_response = "✅ 报告已生成完成！"
+                                return final_response, tool_results
 
                     # 如果没有调用 analyze_data，提醒 LLM 先分析数据
                     else:
@@ -346,9 +573,6 @@ class ToolCallingAgent(BaseAgent):
                 content = [{"text": json.dumps(content)}]
             api_messages.append({"role": msg["role"], "content": content})
 
-        # 调试日志
-        print(f"[DEBUG] LLM 调用：model={self.model}, api_key={'已配置' if self.api_key else '未配置'}")
-
         try:
             response = MultiModalConversation.call(
                 model=self.model,
@@ -367,14 +591,11 @@ class ToolCallingAgent(BaseAgent):
                         item.get('text', '') if isinstance(item, dict) else str(item)
                         for item in content
                     )
-                    print(f"[DEBUG] LLM 调用完成：{len(text)} 字符")
                     return text, None
                 elif isinstance(content, dict):
                     text = content.get('text', '')
-                    print(f"[DEBUG] LLM 调用完成：{len(text)} 字符")
                     return text, None
                 text = str(content) if content else ""
-                print(f"[DEBUG] LLM 调用完成：{len(text)} 字符")
                 return text, None
 
             else:
@@ -686,25 +907,58 @@ class ToolCallingAgent(BaseAgent):
         :param perf: 可选的性能记录器
         :return: (最终回复，工具执行结果列表)
         """
+        # ========== Stage 1: 意图澄清阶段 ==========
+        print(f"[TOOL_CALLING_AGENT] Stage 1: 开始意图澄清")
+        is_clear, clarification_question, needs_report = await self._clarification_stage(
+            user_message, context
+        )
+
+        if not is_clear and clarification_question:
+            # 需要澄清，直接返回澄清问题
+            print(f"[TOOL_CALLING_AGENT] 返回澄清问题：{clarification_question}")
+            await text_callback(clarification_question)
+            return clarification_question, []
+
+        print(f"[TOOL_CALLING_AGENT] Stage 1 完成，需求清晰，needs_report={needs_report}")
+
+        # ========== Stage 2: 工具调用阶段 ==========
         # 初始化消息历史
         messages = [{"role": "user", "content": user_message}]
         tool_results: List[ToolResult] = []
         tool_call_history: List[str] = []
         llm_call_count = 0
         tool_call_count = 0
+        consecutive_tool_failures = 0  # 连续工具失败次数（任务 10 优化）
+
+        # 循环控制配置（任务 10 优化）
+        MAX_LLM_CALLS = 20  # 最大 LLM 调用次数
+        MAX_TOOL_CALLS = 15  # 最大工具调用次数
+        MAX_CONSECUTIVE_FAILURES = 3  # 最大连续失败次数
 
         # 检测用户是否请求生成报告
         user_message_lower = user_message.lower()
         needs_report_generation = any(kw in user_message_lower for kw in [
             "生成报告", "生成分析报告", "并生成报告", "create report", "generate report"
-        ])
+        ]) or needs_report
+
         # 标记是否已调用 analyze_data（用于报告生成流程）
         analyze_data_called = False
         # 标记是否需要强制执行报告生成
         force_report_generation = needs_report_generation
 
-        # Agent 循环
+        # Agent 循环 - 智能退出机制（任务 10 优化）
+        print(f"[TOOL_CALLING_AGENT] Stage 2: 开始工具调用循环，force_report_generation={force_report_generation}")
+        print(f"[TOOL_CALLING_AGENT] 循环限制：MAX_LLM_CALLS={MAX_LLM_CALLS}, MAX_TOOL_CALLS={MAX_TOOL_CALLS}, MAX_CONSECUTIVE_FAILURES={MAX_CONSECUTIVE_FAILURES}")
         while True:
+            # 检查 LLM 调用次数限制（任务 10 优化）
+            if llm_call_count >= MAX_LLM_CALLS:
+                print(f"[TOOL_CALLING_AGENT] 达到 LLM 调用次数上限 ({MAX_LLM_CALLS})，结束循环")
+                messages.append({
+                    "role": "user",
+                    "content": "已达到最大分析轮次，请总结当前已完成的分析结果并回复用户。"
+                })
+                continue
+
             # 调用 LLM（流式）
             llm_start = time.time()
             response, error = await self._call_llm_streaming(messages, context, text_callback)
@@ -735,9 +989,14 @@ class ToolCallingAgent(BaseAgent):
                         "role": "user",
                         "content": f"工具 {tool_name} 已用相同参数调用过，请不要重复调用，直接总结分析结果。"
                     })
+                    consecutive_tool_failures += 1  # 重复调用视为失败
+                    if consecutive_tool_failures >= MAX_CONSECUTIVE_FAILURES:
+                        print(f"[TOOL_CALLING_AGENT] 连续失败 {consecutive_tool_failures} 次，强制退出")
+                        return "分析过程中遇到连续问题，已完成的分析结果请参考上文。", tool_results
                     continue
 
-                if len(tool_results) >= 15:
+                # 防止过多工具调用（任务 10 优化）
+                if len(tool_results) >= MAX_TOOL_CALLS:
                     messages.append({
                         "role": "user",
                         "content": "已执行较多工具调用，请总结当前分析结果并回复用户。"
@@ -755,8 +1014,9 @@ class ToolCallingAgent(BaseAgent):
                     })
                     continue
 
-                # 自动注入 session_id
-                if "session_id" not in tool_args and "session_id" in context:
+                # 强制注入 session_id（覆盖 LLM 生成的值，因为 LLM 可能编造错误的 session_id）
+                # session_id 是系统级参数，必须由系统注入，不能依赖 LLM 提供
+                if "session_id" in context:
                     tool_args["session_id"] = context["session_id"]
 
                 # 执行工具
@@ -772,24 +1032,67 @@ class ToolCallingAgent(BaseAgent):
 
                 tool_results.append(result)
 
+                # 将分析结果写入共享存储（任务 4）
+                if result.success and result.data and isinstance(result.data, dict):
+                    if self.session_manager and context.get("session_id"):
+                        # 提取分析相关的数据写入共享存储
+                        analysis_data = {}
+                        if tool_name == "analyze_data":
+                            analysis_data = result.data
+                        elif tool_name == "get_column_distribution":
+                            analysis_data = {"column_stats": {result.data.get("column_name", "unknown"): result.data}}
+                        elif tool_name == "get_column_statistics":
+                            analysis_data = {"column_stats": {result.data.get("column_name", "unknown"): result.data}}
+                        elif tool_name == "generate_chart":
+                            analysis_data = {"charts": result.data.get("charts", [])}
+                        elif tool_name == "generate_correlation_heatmap":
+                            analysis_data = {"charts": result.data.get("charts", [])}
+                        elif tool_name == "auto_generate_charts":
+                            analysis_data = {"charts": result.data.get("charts", []), "key_findings": result.data.get("findings", [])}
+
+                        if analysis_data:
+                            self.session_manager.store_analysis_result(
+                                session_id=context.get("session_id"),
+                                result=analysis_data
+                            )
+                            print(f"[TOOL_CALLING_AGENT] 已写入共享存储，tool: {tool_name}, session: {context.get('session_id')}")
+
                 # 将工具调用和结果添加到消息历史
                 messages.append({
                     "role": "assistant",
                     "content": f"正在处理{self._get_action_name(tool_name)}..."
                 })
 
-                # 工具执行失败时，不将详细错误消息添加到历史，避免 LLM 复述错误
-                # 而是用一个中性提示让 LLM 重试或跳过此工具
+                # 工具执行失败处理（任务 10 优化：连续失败检测）
                 if not result.success:
-                    messages.append({
-                        "role": "user",
-                        "content": f"{self._get_action_name(tool_name)}执行失败，请尝试其他方法或跳过此步骤。"
-                    })
+                    consecutive_tool_failures += 1
+                    print(f"[TOOL_CALLING_AGENT] 工具执行失败 #{consecutive_tool_failures}: {tool_name}")
+
+                    if consecutive_tool_failures >= MAX_CONSECUTIVE_FAILURES:
+                        # 连续失败次数过多，强制退出并反馈
+                        print(f"[TOOL_CALLING_AGENT] 连续失败 {consecutive_tool_failures} 次，强制退出循环")
+                        messages.append({
+                            "role": "user",
+                            "content": f"工具调用连续失败 {consecutive_tool_failures} 次，请停止调用工具，直接总结当前已完成的分析并回复用户。"
+                        })
+                        # 不立即 return，让 LLM 生成总结
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": f"{self._get_action_name(tool_name)}执行失败 ({consecutive_tool_failures}/{MAX_CONSECUTIVE_FAILURES})，请尝试其他方法或跳过此步骤。"
+                        })
                 else:
-                    messages.append({
-                        "role": "user",
-                        "content": self._get_tool_result_message(tool_name, result)
-                    })
+                    # 工具执行成功，重置失败计数器
+                    consecutive_tool_failures = 0
+                    # 当用户要求生成报告时，抑制中间工具执行结果的回复，避免输出"建议后续操作"等混淆内容
+                    if not force_report_generation:
+                        messages.append({
+                            "role": "user",
+                            "content": self._get_tool_result_message(tool_name, result)
+                        })
+                    else:
+                        # 报告生成流程中，只记录日志，不添加消息让 LLM 生成中间回复
+                        print(f"[TOOL_CALLING_AGENT] 工具执行成功（报告生成流程中，抑制中间回复）: {tool_name}")
 
                 # 跟踪 analyze_data 是否已调用
                 if tool_name == "analyze_data":
@@ -800,11 +1103,12 @@ class ToolCallingAgent(BaseAgent):
 
                 if result.data and isinstance(result.data, dict):
                     if result.data.get('report_id'):
-                        messages.append({
-                            "role": "user",
-                            "content": "报告已生成，请总结分析结果并告诉用户可以进行更多分析。"
-                        })
+                        # 报告已生成，关闭强制标志，允许生成最终回复
                         force_report_generation = False
+                        # 直接返回，不再让 LLM 生成额外的"建议后续操作"回复
+                        # 前端会根据 report_url 自动显示报告操作按钮
+                        final_response = f"✅ 报告已生成完成！"
+                        return final_response, tool_results
 
             elif "response" in parsed:
                 # 检查是否需要强制生成报告（用户明确要求但 LLM 没有调用）
@@ -843,13 +1147,10 @@ class ToolCallingAgent(BaseAgent):
                             })
 
                             if result.success and result.data and result.data.get('report_id'):
-                                # 报告生成成功，让 LLM 生成总结回复
-                                messages.append({
-                                    "role": "user",
-                                    "content": "报告已生成，请总结分析结果并告诉用户可以进行更多分析。"
-                                })
-                                # 再次调用 LLM 生成总结
-                                continue
+                                # 报告生成成功，直接返回，不再让 LLM 生成额外的"建议后续操作"回复
+                                # 前端会根据 report_url 自动显示报告操作按钮
+                                final_response = "✅ 报告已生成完成！"
+                                return final_response, tool_results
 
                     # 如果没有调用 analyze_data，提醒 LLM 先分析数据
                     else:
@@ -894,7 +1195,7 @@ class ToolCallingAgent(BaseAgent):
             api_messages.append({"role": msg["role"], "content": content})
 
         # 调试日志
-        print(f"[DEBUG] 流式调用 LLM: model={self.model}, api_key={'已配置' if self.api_key else '未配置'}")
+        print(f"[TOOL_CALLING_AGENT] 流式调用 LLM: model={self.model}, api_key={'已配置' if self.api_key else '未配置'}")
 
         try:
             # 使用 MultiModalConversation API 进行流式调用
@@ -929,8 +1230,6 @@ class ToolCallingAgent(BaseAgent):
                 else:
                     print(f"[ERROR] 流式调用失败：{chunk.code} - {chunk.message}")
                     return "", f"API 错误：{chunk.code} - {chunk.message}"
-
-            print(f"[DEBUG] 流式调用完成：共 {chunk_count} 个 chunk，{len(full_response)} 字符")
 
             # 解析完整响应，过滤工具调用标记，发送用户友好的内容
             parsed = self._parse_response(full_response)

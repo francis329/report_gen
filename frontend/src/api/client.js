@@ -38,14 +38,8 @@ export const uploadApi = {
   },
 }
 
-// 聊天
+// 聊天 - 流式接口（通过 WebSocket 接收实时回复）
 export const chatApi = {
-  // 普通发送（等待完整响应）
-  send(sessionId, message) {
-    return api.post(`/sessions/${sessionId}/chat`, { message })
-  },
-
-  // 流式发送（通过 WebSocket 接收实时回复）
   sendStreaming(sessionId, message, onChunk, onComplete, onError) {
     // 将消息作为 URL 查询参数传递，避免 WebSocket 连接后阻塞等待消息
     const wsUrl = `ws://${window.location.host}/api/sessions/${sessionId}/chat/stream?message=${encodeURIComponent(message)}`
@@ -90,12 +84,6 @@ export const reportApi = {
   get(sessionId) {
     return api.get(`/sessions/${sessionId}/report`)
   },
-  // 生成智能报告（异步，通过 WebSocket 接收进度）
-  generate(sessionId, userRequest) {
-    return api.post(`/sessions/${sessionId}/generate-report`, {
-      user_request: userRequest
-    })
-  },
   // 下载报告
   downloadUrl(reportId) {
     return `/api/reports/${reportId}/download`
@@ -103,33 +91,6 @@ export const reportApi = {
   // 查看报告链接
   viewUrl(reportId) {
     return `/api/reports/${reportId}`
-  },
-  // 创建 WebSocket 连接监听进度
-  connectProgress(sessionId, onProgress, onError) {
-    const wsUrl = `ws://${window.location.host}/ws/progress/${sessionId}`
-    const ws = new WebSocket(wsUrl)
-
-    ws.onopen = () => {
-      console.log('WebSocket 连接已建立')
-    }
-
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data)
-      if (msg.type === 'progress') {
-        onProgress(msg.data)
-      }
-    }
-
-    ws.onerror = (error) => {
-      console.error('WebSocket 错误:', error)
-      if (onError) onError(error)
-    }
-
-    ws.onclose = () => {
-      console.log('WebSocket 连接已关闭')
-    }
-
-    return ws
   },
   // 获取图表原始数据
   getChartData(chartId, sessionId, elementKey = null) {

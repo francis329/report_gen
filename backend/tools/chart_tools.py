@@ -24,7 +24,8 @@ class GenerateChartTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 ),
                 ToolParameter(
                     name="chart_type",
@@ -52,7 +53,7 @@ class GenerateChartTool(BaseTool):
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         from backend.utils.chart_builder import ChartBuilder
 
         session_id = kwargs.get("session_id")
@@ -177,7 +178,8 @@ class GenerateCorrelationHeatmapTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 ),
                 ToolParameter(
                     name="title",
@@ -189,7 +191,7 @@ class GenerateCorrelationHeatmapTool(BaseTool):
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         from backend.utils.chart_builder import ChartBuilder
         import numpy as np
 
@@ -275,12 +277,13 @@ class AutoGenerateChartsTool(BaseTool):
                 ToolParameter(
                     name="session_id",
                     type="string",
-                    description="会话 ID"
+                    description="会话 ID（此参数由系统自动注入，无需指定）",
+                    required=False
                 )
             ]
         )
 
-    async def execute(self, **kwargs) -> ToolResult:
+    async def _execute_impl(self, **kwargs) -> ToolResult:
         from backend.utils.chart_builder import ChartBuilder
 
         session_id = kwargs.get("session_id")
